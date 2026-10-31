@@ -18,7 +18,9 @@ how far above its trigger height the switch re-opens; FF_PROBE_RELEASE_TEST
 measures it and SAVE_CONFIG keeps it. XY travel runs at travel_speed and
 travel_accel, the fastest any built-in command moves the carriage (the tool
 change's fast_feed, the print acceleration START_PRINT restores), for the
-length of the probe run only. Z speeds are left as configured.
+length of the probe run only. Z speeds and accelerations are left as
+configured. Each point is touched `samples` times when set, in place of the
+[probe] section's count, which PROBE, homing and the tool calibrations keep.
 
 The first transfer still goes to a safe absolute height, and a calculated
 target below low_height_threshold falls back to recovery_move_z.
@@ -46,6 +48,7 @@ class FFBedMesh:
         self.release_margin = config.getfloat('release_margin', .2, above=0.)
         self.travel_speed = config.getfloat('travel_speed', None, above=0.)
         self.travel_accel = config.getfloat('travel_accel', None, above=0.)
+        self.samples = config.getint('samples', None, minval=1)
         self.low_height_threshold = config.getfloat(
             'low_height_threshold', 1.)
         self.recovery_move_z = config.getfloat(
@@ -101,11 +104,13 @@ class FFBedMesh:
         start_probe = helper.start_probe
 
         def start_probe_with_lift(gcmd):
-            # The retract between samples at one point. An explicit
-            # SAMPLE_RETRACT_DIST on the command still wins.
+            # The retract between samples at one point, and how many there
+            # are. Either given explicitly on the command still wins.
             params = gcmd.get_command_parameters()
             if 'SAMPLE_RETRACT_DIST' not in params:
                 params['SAMPLE_RETRACT_DIST'] = '%.3f' % (self.lift(),)
+            if self.samples is not None and 'SAMPLES' not in params:
+                params['SAMPLES'] = '%d' % (self.samples,)
             if self.travel_accel is None:
                 return start_probe(gcmd)
             # For the probe run only, put back afterwards even when it fails.
@@ -151,6 +156,7 @@ class FFBedMesh:
             'lift': self.lift(),
             'travel_speed': self.travel_speed,
             'travel_accel': self.travel_accel,
+            'samples': self.samples,
             'low_height_threshold': self.low_height_threshold,
             'recovery_move_z': self.recovery_move_z,
         }
@@ -159,11 +165,12 @@ class FFBedMesh:
         gcmd.respond_info(
             "FF bed mesh: path=standard, dynamic_z=yes\n"
             "lift=%.3f (release_distance %.3f + release_margin %.3f) between "
-            "points and between samples\n"
+            "points and between samples; samples per point: %s\n"
             "travel_speed=%s, travel_accel=%s, first_move_z=%.3f, "
             "low_height_threshold=%.3f, recovery_move_z=%.3f\n"
             "Recovery is evaluated per point and is not latched."
             % (self.lift(), self.release_distance, self.release_margin,
+               '[probe] default' if self.samples is None else self.samples,
                'bed_mesh speed' if self.travel_speed is None
                else '%.0f mm/s' % self.travel_speed,
                'unchanged' if self.travel_accel is None

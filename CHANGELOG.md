@@ -32,7 +32,9 @@ both printer models or through every real-world workflow.
   plus 0.2 mm, above the previous trigger -- between points and between
   samples at a point -- instead of back to one fixed height, and travels X/Y
   at 500 mm/s and 20000 mm/s², the fastest the carriage moves anywhere else,
-  instead of the stock 200 mm/s and 2000 mm/s². Z speeds are unchanged. Run
+  instead of the stock 200 mm/s and 2000 mm/s². Each point is touched twice
+  rather than three times; other probing keeps three. Z speeds and
+  acceleration are unchanged. Run
   `FF_PROBE_RELEASE_TEST SAVE=1` then `SAVE_CONFIG` once to measure where the
   switch opens; until then the lift is 2 mm. The first move still goes to Z 5,
   and a calculated height under Z 1 falls back to Z 3. `FF_BED_MESH_STATUS`

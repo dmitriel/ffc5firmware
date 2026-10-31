@@ -105,6 +105,9 @@ class Config:
     def getfloat(self, option, default, minval=None, above=None):
         return self.values.get(option, default)
 
+    def getint(self, option, default, minval=None):
+        return self.values.get(option, default)
+
 
 def install(module, **values):
     helper = Helper()
@@ -346,3 +349,19 @@ def test_a_failed_probe_run_still_restores_the_accel(ff_bed_mesh):
     with pytest.raises(RuntimeError):
         helper.start_probe(Gcmd())
     assert scripts[-1] == "SET_VELOCITY_LIMIT ACCEL=2000"
+
+
+def test_mesh_points_take_the_configured_sample_count(ff_bed_mesh):
+    _, helper, _ = install(ff_bed_mesh, samples=2)
+
+    helper.start_probe(Gcmd())
+    assert helper.probed_with["SAMPLES"] == "2"
+
+    helper.start_probe(Gcmd(SAMPLES=5))
+    assert helper.probed_with["SAMPLES"] == "5"
+
+
+def test_without_samples_the_probe_section_decides(ff_bed_mesh):
+    _, helper, _ = install(ff_bed_mesh)
+    helper.start_probe(Gcmd())
+    assert "SAMPLES" not in helper.probed_with
