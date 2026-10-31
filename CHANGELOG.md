@@ -8,6 +8,14 @@ both printer models or through every real-world workflow.
 
 ### Added
 
+- Thermal mesh map: `THERMAL_MESH_SWEEP` probes full meshes at every bed and
+  chamber temperature pair in a range (serpentine order, heat-soaked, repeated
+  until two agree within a threshold) and stores them in `thermal_mesh.json`;
+  `THERMAL_MESH_ANALYZE` finds the four mesh points most sensitive to each
+  temperature; `THERMAL_MESH_APPLY` probes only those and loads a mesh
+  interpolated from the closest matches (`bilinear`, `idw`, `nearest`, or
+  `temperature` without probing). Not used unless called. See
+  [the thermal mesh page](docs/thermal-mesh.md).
 - Bed-mesh probing lifts 2 mm above the previous trigger instead of back to one
   fixed height before every point, which shortens `BED_MESH_CALIBRATE`
   noticeably. The first move still goes to Z 5, and a calculated height under
