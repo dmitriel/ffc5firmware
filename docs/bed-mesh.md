@@ -69,3 +69,14 @@ prints the probed points, and HelixScreen draws the same data as a surface.
 What you are looking for is a shape that looks like a plate — a gentle bow or
 tilt — rather than one point far away from its neighbours, which usually
 means the probe was disturbed rather than the bed being that shape.
+
+---
+
+## A mesh for each temperature
+
+A plate probed hot is a different shape from one probed cold, and on the
+Creator 5 Pro the chamber's temperature moves it too. If you print across a
+wide range of bed and chamber temperatures, the
+[thermal mesh map](thermal-mesh.md) can map the plate at every combination
+once and then choose the matching mesh for each print from four probe points.
+It is optional and nothing uses it unless you call it.
