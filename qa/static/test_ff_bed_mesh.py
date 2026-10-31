@@ -365,3 +365,140 @@ def test_without_samples_the_probe_section_decides(ff_bed_mesh):
     _, helper, _ = install(ff_bed_mesh)
     helper.start_probe(Gcmd())
     assert "SAMPLES" not in helper.probed_with
+
+
+class ScriptedSession:
+    """A fork ProbeSessionHelper whose touches read from a list."""
+
+    def __init__(self, zs, tolerance=0.02, retries=10, result="average"):
+        self.zs = list(zs)
+        self.touches = 0
+        self.results = []
+        self.ended = False
+        self.params = {"probe_speed": 3., "lift_speed": 10., "samples": 2,
+                       "sample_retract_dist": 0.5,
+                       "samples_tolerance": tolerance,
+                       "samples_tolerance_retries": retries,
+                       "samples_result": result}
+
+    def get_probe_params(self, gcmd=None):
+        return dict(self.params)
+
+    def _probe(self, speed):
+        self.touches += 1
+        z = self.zs.pop(0)
+        return 9999 if z == 9999 else [10., 20., z]
+
+    def pull_probed_results(self):
+        return self.results
+
+    def end_probe_session(self):
+        self.ended = True
+
+
+class RetractToolhead(Toolhead):
+    def __init__(self):
+        super().__init__()
+        self.retracts = []
+
+    def manual_move(self, coord, speed):
+        self.retracts.append((coord, speed))
+
+
+def run_point(ff_bed_mesh, zs, **params):
+    adapter, _, printer = install(ff_bed_mesh, samples=2)
+    printer.toolhead = RetractToolhead()
+    printer.objects["toolhead"] = printer.toolhead
+    session = ScriptedSession(zs, **params)
+    gcmd = Gcmd()
+    ff_bed_mesh.TiebreakSession(adapter, session).run_probe(gcmd)
+    return session, printer.toolhead, gcmd
+
+
+def test_two_touches_that_agree_are_the_point(ff_bed_mesh):
+    session, toolhead, gcmd = run_point(ff_bed_mesh, [0.100, 0.110])
+    assert session.touches == 2
+    assert session.results[0][2] == pytest.approx(0.105)
+    assert len(toolhead.retracts) == 1          # between the two only
+    assert toolhead.retracts[0][0][2] == pytest.approx(0.6)
+    assert gcmd.info == []
+
+
+def test_a_third_touch_breaks_the_tie_and_keeps_the_good_pair(ff_bed_mesh):
+    session, _, gcmd = run_point(ff_bed_mesh, [0.100, 0.180, 0.110])
+    assert session.touches == 3
+    assert session.results[0][2] == pytest.approx(0.105)
+    assert "one more" in gcmd.info[0]
+
+
+def test_the_third_touch_can_side_with_the_second(ff_bed_mesh):
+    session, _, _ = run_point(ff_bed_mesh, [0.180, 0.100, 0.105])
+    assert session.results[0][2] == pytest.approx(0.1025)
+
+
+def test_three_that_never_agree_start_the_point_over(ff_bed_mesh):
+    session, _, gcmd = run_point(ff_bed_mesh,
+                                 [0.10, 0.20, 0.30, 0.100, 0.101])
+    assert session.touches == 5
+    assert session.results[0][2] == pytest.approx(0.1005)
+    assert any("Retrying" in m for m in gcmd.info)
+
+
+def test_retries_run_out_like_klippys(ff_bed_mesh):
+    with pytest.raises(RuntimeError, match="exceed samples_tolerance"):
+        run_point(ff_bed_mesh, [0.1, 0.2, 0.3] * 2, retries=1)
+
+
+def test_a_pretriggered_touch_is_retaken_but_not_forever(ff_bed_mesh):
+    session, _, _ = run_point(ff_bed_mesh, [9999, 0.100, 0.101])
+    assert session.results[0][2] == pytest.approx(0.1005)
+    with pytest.raises(RuntimeError, match="still triggered"):
+        run_point(ff_bed_mesh, [9999] * 5)
+
+
+def test_median_results_follow_the_probe_section(ff_bed_mesh):
+    session, _, _ = run_point(ff_bed_mesh, [0.100, 0.180, 0.110],
+                              result="median")
+    assert session.results[0][2] == pytest.approx(0.105)
+
+
+class RealProbe:
+    """start_probe_session as a method, the way klippy's PrinterProbe has it."""
+
+    def start_probe_session(self, gcmd):
+        return "real session"
+
+
+def test_the_mesh_run_samples_with_the_tiebreak_and_then_lets_go(ff_bed_mesh):
+    adapter, _, printer = install(ff_bed_mesh, samples=2)
+    real = RealProbe()
+    printer.objects["probe"] = real
+    seen = []
+    inner = Helper()
+    inner.start_probe = lambda gcmd: seen.append(
+        real.start_probe_session(gcmd))
+    adapter.attach(inner)
+
+    inner.start_probe(Gcmd())
+
+    assert isinstance(seen[0], ff_bed_mesh.TiebreakSession)
+    assert seen[0].session == "real session"
+    # Afterwards PROBE and the calibrations get the standard session again.
+    assert "start_probe_session" not in vars(real)
+    assert real.start_probe_session(None) == "real session"
+
+
+def test_the_session_is_released_when_the_mesh_fails(ff_bed_mesh):
+    adapter, _, printer = install(ff_bed_mesh, samples=2)
+    real = RealProbe()
+    printer.objects["probe"] = real
+    inner = Helper()
+
+    def fail(gcmd):
+        raise RuntimeError("probe failed")
+    inner.start_probe = fail
+    adapter.attach(inner)
+
+    with pytest.raises(RuntimeError):
+        inner.start_probe(Gcmd())
+    assert "start_probe_session" not in vars(real)

@@ -19,8 +19,17 @@ measures it and SAVE_CONFIG keeps it. XY travel runs at travel_speed and
 travel_accel, the fastest any built-in command moves the carriage (the tool
 change's fast_feed, the print acceleration START_PRINT restores), for the
 length of the probe run only. Z speeds and accelerations are left as
-configured. Each point is touched `samples` times when set, in place of the
-[probe] section's count, which PROBE, homing and the tool calibrations keep.
+configured.
+
+Sampling, when `samples` is set: each point is touched `samples` times (2).
+If those disagree by more than [probe] samples_tolerance, it touches again,
+up to `tiebreak_samples` more (1), and accepts the closest `samples` of all
+the touches as soon as they agree. Only when none do are they all thrown
+away and the point started over, counting against
+samples_tolerance_retries. A clean point therefore costs two touches and one
+bad touch costs one more, where stock Klipper would discard both good
+touches with it. PROBE, homing and the tool calibrations keep the [probe]
+section's own count and its standard sampling.
 
 The first transfer still goes to a safe absolute height, and a calculated
 target below low_height_threshold falls back to recovery_move_z.
@@ -49,6 +58,8 @@ class FFBedMesh:
         self.travel_speed = config.getfloat('travel_speed', None, above=0.)
         self.travel_accel = config.getfloat('travel_accel', None, above=0.)
         self.samples = config.getint('samples', None, minval=1)
+        self.tiebreak_samples = config.getint('tiebreak_samples', 1,
+                                              minval=0)
         self.low_height_threshold = config.getfloat(
             'low_height_threshold', 1.)
         self.recovery_move_z = config.getfloat(
@@ -111,18 +122,33 @@ class FFBedMesh:
                 params['SAMPLE_RETRACT_DIST'] = '%.3f' % (self.lift(),)
             if self.samples is not None and 'SAMPLES' not in params:
                 params['SAMPLES'] = '%d' % (self.samples,)
-            if self.travel_accel is None:
-                return start_probe(gcmd)
-            # For the probe run only, put back afterwards even when it fails.
-            # Probing moves are Z, which max_z_accel limits on its own.
-            toolhead = self.printer.lookup_object('toolhead')
-            eventtime = self.printer.get_reactor().monotonic()
-            restore = toolhead.get_status(eventtime)['max_accel']
-            self._set_accel(self.travel_accel)
+            probe = self.printer.lookup_object('probe', None)
+            restore_accel = restore_session = None
+            if self.travel_accel is not None:
+                # For the probe run only, put back afterwards even when it
+                # fails. Probing moves are Z, which max_z_accel limits on
+                # its own.
+                toolhead = self.printer.lookup_object('toolhead')
+                eventtime = self.printer.get_reactor().monotonic()
+                restore_accel = toolhead.get_status(eventtime)['max_accel']
+                self._set_accel(self.travel_accel)
+            if self.samples is not None and probe is not None:
+                # Only this run's session samples the tiebreak way: the
+                # instance attribute shadows the method for its duration.
+                restore_session = vars(probe).get('start_probe_session')
+                open_session = probe.start_probe_session
+                probe.start_probe_session = lambda g: TiebreakSession(
+                    self, open_session(g))
             try:
                 return start_probe(gcmd)
             finally:
-                self._set_accel(restore)
+                if self.samples is not None and probe is not None:
+                    if restore_session is None:
+                        del probe.start_probe_session
+                    else:
+                        probe.start_probe_session = restore_session
+                if restore_accel is not None:
+                    self._set_accel(restore_accel)
         helper.start_probe = start_probe_with_lift
 
     def _set_accel(self, accel):
@@ -157,6 +183,7 @@ class FFBedMesh:
             'travel_speed': self.travel_speed,
             'travel_accel': self.travel_accel,
             'samples': self.samples,
+            'tiebreak_samples': self.tiebreak_samples,
             'low_height_threshold': self.low_height_threshold,
             'recovery_move_z': self.recovery_move_z,
         }
@@ -165,12 +192,14 @@ class FFBedMesh:
         gcmd.respond_info(
             "FF bed mesh: path=standard, dynamic_z=yes\n"
             "lift=%.3f (release_distance %.3f + release_margin %.3f) between "
-            "points and between samples; samples per point: %s\n"
+            "points and between samples; samples per point: %s, tiebreak: "
+            "up to %d more\n"
             "travel_speed=%s, travel_accel=%s, first_move_z=%.3f, "
             "low_height_threshold=%.3f, recovery_move_z=%.3f\n"
             "Recovery is evaluated per point and is not latched."
             % (self.lift(), self.release_distance, self.release_margin,
                '[probe] default' if self.samples is None else self.samples,
+               self.tiebreak_samples if self.samples is not None else 0,
                'bed_mesh speed' if self.travel_speed is None
                else '%.0f mm/s' % self.travel_speed,
                'unchanged' if self.travel_accel is None
@@ -230,6 +259,90 @@ class FFBedMesh:
         else:
             msg += " Run with SAVE=1, then SAVE_CONFIG, to keep it."
         gcmd.respond_info(msg)
+
+
+def closest_agreeing(positions, count, tolerance):
+    """The `count` positions whose Z spread least, if within tolerance."""
+    if len(positions) < count:
+        return None
+    ordered = sorted(positions, key=lambda p: p[2])
+    best = None
+    for i in range(len(ordered) - count + 1):
+        window = ordered[i:i + count]
+        spread = window[-1][2] - window[0][2]
+        if spread <= tolerance and (best is None or spread < best[0]):
+            best = (spread, window)
+    return None if best is None else best[1]
+
+
+def combine(positions, method):
+    """klippy probe.calc_probe_z_average, for one point's samples."""
+    if method != 'median':
+        return [sum(p[i] for p in positions) / len(positions)
+                for i in range(3)]
+    ordered = sorted(positions, key=lambda p: p[2])
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return list(ordered[middle])
+    return combine(ordered[middle - 1:middle + 1], 'average')
+
+
+class TiebreakSession:
+    """A probe session whose run_probe samples with a tiebreak.
+
+    Everything except run_probe is the real session's: the results list,
+    pull_probed_results and end_probe_session. Each touch is the fork's own
+    ProbeSessionHelper._probe, so its pre-touch "already triggered" checks
+    and its reporting are unchanged.
+    """
+    # The fork returns 9999 for a touch that found the switch closed before
+    # it moved, and retries it forever; this gives up after a few.
+    MAX_PRETRIGGERED = 5
+
+    def __init__(self, adapter, session):
+        self.adapter = adapter
+        self.session = session
+
+    def __getattr__(self, name):
+        return getattr(self.session, name)
+
+    def run_probe(self, gcmd):
+        session = self.session
+        params = session.get_probe_params(gcmd)
+        count = params['samples']
+        tolerance = params['samples_tolerance']
+        limit = count + self.adapter.tiebreak_samples
+        toolhead = self.adapter.printer.lookup_object('toolhead')
+        probexy = toolhead.get_position()[:2]
+        retries = pretriggered = 0
+        positions = []
+        while True:
+            pos = session._probe(params['probe_speed'])
+            if pos == 9999:
+                pretriggered += 1
+                if pretriggered >= self.MAX_PRETRIGGERED:
+                    raise gcmd.error("Probe still triggered before %d touches"
+                                     " in a row" % (pretriggered,))
+                continue
+            positions.append(pos)
+            chosen = closest_agreeing(positions, count, tolerance)
+            if chosen is not None:
+                break
+            if len(positions) >= limit:
+                if retries >= params['samples_tolerance_retries']:
+                    raise gcmd.error("Probe samples exceed samples_tolerance")
+                gcmd.respond_info("Probe samples exceed tolerance. "
+                                  "Retrying...")
+                retries += 1
+                positions = []
+            elif len(positions) >= count:
+                gcmd.respond_info("Probe samples %.4f apart; one more"
+                                  % (max(p[2] for p in positions)
+                                     - min(p[2] for p in positions),))
+            toolhead.manual_move(
+                probexy + [pos[2] + params['sample_retract_dist']],
+                params['lift_speed'])
+        session.results.append(combine(chosen, params['samples_result']))
 
 
 def load_config(config):

@@ -209,6 +209,9 @@ and 20000 mm/s², the fastest the carriage moves anywhere else, for the probing
 run only — `[ff_bed_mesh]`'s `travel_speed` and `travel_accel`. (The stock
 application dropped acceleration to 2000 for it.) Each point is touched
 twice, `[ff_bed_mesh]`'s `samples`, where other probing touches three times.
+If those two disagree by more than the probe's `samples_tolerance`, a third
+touch decides between them, and the point is probed again from scratch only
+if no two of the three agree.
 
 The consequence catches people out: probing a mesh by hand leaves it in
 `default`, which the automatic path never loads. To make your own mesh the

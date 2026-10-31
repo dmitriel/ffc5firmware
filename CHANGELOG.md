@@ -33,7 +33,9 @@ both printer models or through every real-world workflow.
   samples at a point -- instead of back to one fixed height, and travels X/Y
   at 500 mm/s and 20000 mm/s², the fastest the carriage moves anywhere else,
   instead of the stock 200 mm/s and 2000 mm/s². Each point is touched twice
-  rather than three times; other probing keeps three. Z speeds and
+  rather than three times, and a third time only if the two disagree, keeping
+  whichever pair agrees; the point starts over only when none does. Other
+  probing keeps three. Z speeds and
   acceleration are unchanged. Run
   `FF_PROBE_RELEASE_TEST SAVE=1` then `SAVE_CONFIG` once to measure where the
   switch opens; until then the lift is 2 mm. The first move still goes to Z 5,
