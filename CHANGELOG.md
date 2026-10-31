@@ -28,11 +28,15 @@ both printer models or through every real-world workflow.
   `SET_BED_GUARD ENABLE=0` turns it off until a restart, for a paper test.
   The settings are the `[ff_bed_guard]` section of `ff-toolchange.cfg`. Not
   yet tested on hardware.
-- Bed-mesh probing lifts 2 mm above the previous trigger instead of back to one
-  fixed height before every point, which shortens `BED_MESH_CALIBRATE`
-  noticeably. The first move still goes to Z 5, and a calculated height under
-  Z 1 falls back to Z 3. `FF_BED_MESH_STATUS` shows the settings; they are the
-  `[ff_bed_mesh]` section of `ff-print-macros.cfg`. Contributed by
+- Bed-mesh probing lifts only as far as the probe switch needs to open again,
+  plus 1 mm, above the previous trigger -- between points and between samples
+  at a point -- instead of back to one fixed height, and travels X/Y at
+  500 mm/s, the tool change's top speed. Z speeds are unchanged. Run
+  `FF_PROBE_RELEASE_TEST SAVE=1` then `SAVE_CONFIG` once to measure where the
+  switch opens; until then the lift is 2 mm. The first move still goes to Z 5,
+  and a calculated height under Z 1 falls back to Z 3. `FF_BED_MESH_STATUS`
+  shows the settings; they are the `[ff_bed_mesh]` section of
+  `ff-print-macros.cfg`. Contributed by
   [@nielssedat](https://github.com/nielssedat) in
   [#29](https://github.com/Klipper4FlashForge/firmware/pull/29).
 - `ADAPTIVE_MESH` and `DEFINE_PRIME_TOWER_OBJECT` for a slicer profile whose

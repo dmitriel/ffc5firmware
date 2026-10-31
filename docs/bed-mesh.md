@@ -72,6 +72,25 @@ means the probe was disturbed rather than the bed being that shape.
 
 ---
 
+## Making probing faster (optional)
+
+Most of a mesh's time is the probe travelling down at a slow, careful speed,
+so the less it has to lift between touches the sooner it finishes. Once,
+with the plate on and the printer homed:
+
+```gcode
+G1 X125 Y125 Z5 F6000
+FF_PROBE_RELEASE_TEST SAVE=1
+SAVE_CONFIG
+```
+
+The printer touches the plate five times and measures how little it can lift
+each time and still have the probe let go. Every mesh after that lifts just
+that much plus a millimetre. `SAVE_CONFIG` restarts Klipper, so do it between
+prints. It is worth repeating after any work on the probe.
+
+---
+
 ## A mesh for each temperature
 
 A plate probed hot is a different shape from one probed cold, and on the
