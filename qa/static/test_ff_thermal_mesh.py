@@ -20,11 +20,47 @@ PARAMS = {"min_x": 0., "max_x": 200., "min_y": 0., "max_y": 200.,
           "algo": "lagrange", "tension": .2}
 
 
+class ZrefMode:
+    DISABLED = 0
+    IN_MESH = 1
+    PROBE = 2
+
+
+class ZMesh:
+    def __init__(self, params, name):
+        self.params, self.name, self.matrix = params, name, None
+
+    def build_mesh(self, matrix):
+        self.matrix = matrix
+
+
+class ProbePointsHelper:
+    def __init__(self, config, finalize, default_points=None):
+        self.finalize = finalize
+        self.points = default_points
+        self.z_at = None
+
+    def use_xy_offsets(self, flag):
+        pass
+
+    def update_probe_points(self, points, min_points):
+        self.points = points
+
+    def start_probe(self, gcmd):
+        # Probe z_offset 1.0: the trigger reads the bed height plus it.
+        self.finalize((0., 0., 1.),
+                      [[x, y, self.z_at(x, y) + 1.] for x, y in self.points])
+
+
 @pytest.fixture(scope="module")
 def tm():
     pkg = types.ModuleType(PKG)
     pkg.__path__ = []
     sys.modules[PKG] = pkg
+    sys.modules[PKG + ".bed_mesh"] = types.SimpleNamespace(
+        ZrefMode=ZrefMode, ZMesh=ZMesh, BedMeshError=ValueError)
+    sys.modules[PKG + ".probe"] = types.SimpleNamespace(
+        ProbePointsHelper=ProbePointsHelper)
     spec = importlib.util.spec_from_file_location(PKG + ".ff_thermal_mesh",
                                                   MODULE)
     module = importlib.util.module_from_spec(spec)
@@ -238,13 +274,19 @@ class Macro:
 
 class BedMeshObj:
     def __init__(self):
-        self.mesh = None
+        self.mesh, self.saved = None, []
+        self.bmc = types.SimpleNamespace(probe_mgr=types.SimpleNamespace(
+            get_zero_ref_mode=lambda: ZrefMode.DISABLED,
+            get_zero_ref_pos=lambda: None))
 
     def set_mesh(self, mesh):
         self.mesh = mesh
 
     def get_mesh(self):
         return self.mesh
+
+    def save_profile(self, name):
+        self.saved.append(name)
 
 
 class Printer:
@@ -283,6 +325,41 @@ class Config:
         return self.values.get(option, default)
 
     getfloat = getint = get
+
+
+def test_apply_probes_the_points_and_loads_the_blend(tm, tmp_path):
+    entries = mesh_map(tm)
+    points = points_for(tm, entries)
+    path = tmp_path / "thermal_mesh.json"
+    path.write_text(json.dumps({"version": 1, "mesh_params": PARAMS,
+                                "entries": entries,
+                                "analysis": {"points": points}}))
+    printer = Printer()
+    obj = tm.FFThermalMesh(Config(printer, data_file=str(path),
+                                  before_sample_gcode="G28 Z"))
+    printer.handlers["klippy:connect"]()
+    obj.probe_helper.z_at = lambda x, y: bed_shape(50., 80., x, y)
+
+    gcmd = Gcmd(METHOD="nearest", SAVE="hot")
+    printer.gcode.commands["THERMAL_MESH_APPLY"](gcmd)
+
+    assert printer.gcode.scripts[0] == "G28 Z"
+    mesh = printer.bed_mesh.mesh
+    assert mesh.name == "hot"
+    assert mesh.matrix == matrix_at(50., 80.)
+    assert printer.bed_mesh.saved == ["hot"]
+    assert obj.last_apply["weights"] == [[1., 50., 80.]]
+
+
+def test_apply_refuses_without_chosen_points(tm, tmp_path):
+    path = tmp_path / "thermal_mesh.json"
+    path.write_text(json.dumps({"version": 1, "mesh_params": PARAMS,
+                                "entries": mesh_map(tm)}))
+    printer = Printer()
+    tm.FFThermalMesh(Config(printer, data_file=str(path)))
+    printer.handlers["klippy:connect"]()
+    with pytest.raises(RuntimeError, match="THERMAL_MESH_ANALYZE"):
+        printer.gcode.commands["THERMAL_MESH_APPLY"](Gcmd())
 
 
 class Clock:

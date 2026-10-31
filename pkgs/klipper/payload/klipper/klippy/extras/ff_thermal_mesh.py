@@ -41,7 +41,12 @@ import logging
 import math
 import os
 
+from . import bed_mesh as bed_mesh_module
+from . import probe as probe_module
+
 DATA_VERSION = 1
+METHODS = ('bilinear', 'idw', 'nearest', 'temperature')
+CORRECTIONS = ('none', 'offset', 'plane')
 # Far beyond any sweep; restored to the configured value when the sweep ends.
 SWEEP_IDLE_TIMEOUT = 864000.
 
@@ -424,17 +429,24 @@ class FFThermalMesh:
             config, 'before_sample_gcode', 'G28 Z')
         self.after_sample = gcode_macro.load_template(
             config, 'after_sample_gcode', '')
+        # Our own helper, not bed_mesh's: ff_bed_mesh patches that one, and
+        # a 4-point probe has no use for its dynamic lift.
+        self.probe_helper = probe_module.ProbePointsHelper(
+            config, self._probe_finalize, default_points=[(0., 0.)])
+        self.probe_helper.use_xy_offsets(True)
+        self._probed = None
         self.bed_mesh = None
         self.job = None
         self.status = {'state': 'idle', 'step': 0, 'total': 0, 'phase': '',
                        'bed_target': 0., 'chamber_target': 0.,
                        'last_delta': None, 'samples': 0, 'remaining': 0.,
                        'message': ''}
+        self.last_apply = {}
         self.printer.register_event_handler('klippy:connect',
                                             self._handle_connect)
         self.printer.register_event_handler('klippy:shutdown',
                                             self._handle_shutdown)
-        for name in ('SWEEP', 'ABORT', 'STATUS', 'ANALYZE'):
+        for name in ('SWEEP', 'ABORT', 'STATUS', 'ANALYZE', 'APPLY'):
             cmd = 'THERMAL_MESH_' + name
             func = getattr(self, 'cmd_' + cmd)
             self.gcode.register_command(cmd, func,
@@ -451,6 +463,7 @@ class FFThermalMesh:
     def get_status(self, eventtime):
         status = dict(self.status)
         status['data_file'] = self.data_file
+        status['last_apply'] = dict(self.last_apply)
         return status
 
     # -- data file -------------------------------------------------------
@@ -829,6 +842,117 @@ class FFThermalMesh:
         if points is None:
             raise gcmd.error("thermal mesh: the map has a single temperature "
                              "pair; there is nothing to compare")
+
+    # -- apply -----------------------------------------------------------
+    def _probe_finalize(self, offsets, positions):
+        self._probed = (offsets, positions)
+
+    def _probe_points(self, gcmd, points):
+        """Z at each point on the same basis as bed_mesh's probed matrix."""
+        coords = [(p['x'], p['y']) for p in points]
+        zref_mode, zref_pos = 0, None
+        mgr = getattr(getattr(self.bed_mesh, 'bmc', None), 'probe_mgr', None)
+        if mgr is not None:
+            zref_mode = mgr.get_zero_ref_mode()
+            zref_pos = mgr.get_zero_ref_pos()
+        # With a zero_reference_position bed_mesh shifts the whole mesh so
+        # that point reads 0; probing it too puts these on the same footing.
+        if zref_mode != bed_mesh_module.ZrefMode.DISABLED:
+            coords.append(tuple(zref_pos))
+        self._probed = None
+        self.probe_helper.update_probe_points(coords, len(coords))
+        self.probe_helper.start_probe(gcmd)
+        if self._probed is None:
+            raise gcmd.error("thermal mesh: probing returned no result")
+        offsets, positions = self._probed
+        z = [pos[2] - offsets[2] for pos in positions]
+        if zref_mode != bed_mesh_module.ZrefMode.DISABLED:
+            ref = z.pop()
+            z = [v - ref for v in z]
+        return z
+
+    cmd_THERMAL_MESH_APPLY_help = (
+        "Probe the chosen points and load the closest effective mesh")
+
+    def cmd_THERMAL_MESH_APPLY(self, gcmd):
+        if self.job is not None:
+            raise gcmd.error("thermal mesh: a sweep is running")
+        if self.bed_mesh is None:
+            raise gcmd.error("thermal mesh: needs [bed_mesh]")
+        method = gcmd.get('METHOD', 'bilinear').lower()
+        if method not in METHODS:
+            raise gcmd.error("thermal mesh: METHOD must be one of %s"
+                             % (', '.join(METHODS),))
+        correct = gcmd.get('CORRECT', 'none').lower()
+        if correct not in CORRECTIONS:
+            raise gcmd.error("thermal mesh: CORRECT must be one of %s"
+                             % (', '.join(CORRECTIONS),))
+        relative = gcmd.get('MATCH', 'absolute').lower() == 'relative'
+        data = self._require_map(need_points=method != 'temperature')
+        entries, params = data['entries'], data['mesh_params']
+        points = data.get('analysis', {}).get('points', [])
+        measured = None
+        lines = []
+        try:
+            if method == 'temperature':
+                now = self.reactor.monotonic()
+                bed = gcmd.get_float('BED', self._bed_temp(now) or 0.)
+                chamber = gcmd.get_float('CHAMBER',
+                                         self._chamber_temp(now) or 0.)
+                weights, chamber, bed = bilinear_weights(entries, chamber, bed)
+                lines.append("lookup at chamber %.1f bed %.1f" % (chamber, bed))
+                correct = 'none'
+            else:
+                self.gcode.run_script_from_command(self.before_sample.render())
+                measured = self._probe_points(gcmd, points)
+                self.gcode.run_script_from_command(self.after_sample.render())
+                if method == 'bilinear':
+                    fit = fit_bilinear(entries, points, measured, relative)
+                    weights = fit['weights']
+                    lines.append("fit chamber %.1f bed %.1f, rms %.4f mm"
+                                 % (fit['chamber'], fit['bed'], fit['rms']))
+                else:
+                    ranked = rank_entries(entries, points, measured, relative)
+                    if method == 'nearest':
+                        weights = [(1., ranked[0][1])]
+                    else:
+                        weights = idw_weights(
+                            ranked, gcmd.get_int('K', 4, minval=1),
+                            gcmd.get_float('POWER', 2., above=0.))
+                    lines.append("closest: " + ", ".join(
+                        "chamber %.0f bed %.0f %.4f mm" % (
+                            e['chamber'], e['bed'], rms)
+                        for rms, e in ranked[:3]))
+        except ValueError as e:
+            raise gcmd.error("thermal mesh: %s" % (e,))
+        matrix, residuals = effective_mesh(weights, params, points, measured,
+                                           correct)
+        lines.append("blend: " + ", ".join(
+            "%.2f x (chamber %.0f bed %.0f)" % (w, e['chamber'], e['bed'])
+            for w, e in sorted(weights, key=lambda t: -t[0])))
+        if residuals:
+            lines.append("residual at points (mm): " + " ".join(
+                "%+.4f" % r for r in residuals) + " ; correction %s" % correct)
+        name = gcmd.get('SAVE', None)
+        if not gcmd.get_int('DRY_RUN', 0):
+            zmesh = bed_mesh_module.ZMesh(dict(params),
+                                          name or 'thermal-effective')
+            try:
+                zmesh.build_mesh(matrix)
+            except bed_mesh_module.BedMeshError as e:
+                raise gcmd.error(str(e))
+            self.bed_mesh.set_mesh(zmesh)
+            if name:
+                self.bed_mesh.save_profile(name)
+            lines.append("effective mesh loaded")
+        else:
+            lines.append("dry run: mesh not loaded")
+        self.last_apply = {
+            'method': method, 'correct': correct,
+            'measured': measured, 'residuals': residuals,
+            'weights': [[w, e['chamber'], e['bed']] for w, e in weights]}
+        gcmd.respond_info("thermal mesh (%s):\n%s" % (method,
+                                                      "\n".join(lines)))
 
 
 def _fmt_list(values):
