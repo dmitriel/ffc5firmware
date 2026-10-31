@@ -429,8 +429,8 @@ class FFThermalMesh:
             config, 'before_sample_gcode', 'G28 Z')
         self.after_sample = gcode_macro.load_template(
             config, 'after_sample_gcode', '')
-        # Our own helper, not bed_mesh's: ff_bed_mesh patches that one, and
-        # a 4-point probe has no use for its dynamic lift.
+        # Our own helper, not bed_mesh's, so the point list is ours; at
+        # connect ff_bed_mesh lends it the same travel speed and lift.
         self.probe_helper = probe_module.ProbePointsHelper(
             config, self._probe_finalize, default_points=[(0., 0.)])
         self.probe_helper.use_xy_offsets(True)
@@ -455,6 +455,9 @@ class FFThermalMesh:
 
     def _handle_connect(self):
         self.bed_mesh = self.printer.lookup_object('bed_mesh', None)
+        travel = self.printer.lookup_object('ff_bed_mesh', None)
+        if travel is not None:
+            travel.attach(self.probe_helper)
 
     def _handle_shutdown(self):
         if self.job is not None:

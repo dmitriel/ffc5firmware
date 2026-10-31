@@ -474,3 +474,19 @@ def test_a_resumed_sweep_skips_the_stored_pairs(tm, tmp_path):
 
     assert set(printer.probes) == {(30., 100.)}
     assert len(json.loads(path.read_text())["entries"]) == 3
+
+
+def test_the_point_probe_borrows_the_mesh_probing_travel(tm, tmp_path):
+    attached = []
+
+    class WithTravel(Printer):
+        def lookup_object(self, name, default=None):
+            if name == "ff_bed_mesh":
+                return types.SimpleNamespace(attach=attached.append)
+            return super().lookup_object(name, default)
+
+    printer = WithTravel()
+    obj = tm.FFThermalMesh(Config(printer,
+                                  data_file=str(tmp_path / "m.json")))
+    printer.handlers["klippy:connect"]()
+    assert attached == [obj.probe_helper]
