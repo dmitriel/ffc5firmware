@@ -12,6 +12,7 @@ with Klipper and a toolchanger-aware web and touchscreen experience.
 | Calibration import | Factory dock, station, nozzle, and bed data imported on first boot | ✅ Yes |
 | Printing | Stock slicer G-code, preparation, mesh, clean, tool checks, cancel/pause/resume | ✅ Yes |
 | Toolchanger | T0–T3 selection, docking/grabbing, mounted-tool detection, safe homing | ✅ Yes |
+| Bed collision guard | Refuses any move that would bring the nozzle or bare carriage within 0.1 mm of the bed; `SET_BED_GUARD` | 🧪 Not yet on hardware |
 | Tool calibration | Per-tool offsets, station calibration, bounded probes, sanity checks | ✅ Yes |
 | Bed mesh | Factory mesh import, 10×10 probing, save/load through `MESH_DATA` | ✅ Yes |
 | Filament | Tool-specific load, unload, purge, cold wipe, material temperatures | ✅ Yes |

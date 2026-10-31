@@ -16,6 +16,18 @@ both printer models or through every real-world workflow.
   interpolated from the closest matches (`bilinear`, `idw`, `nearest`, or
   `temperature` without probing). Not used unless called. See
   [the thermal mesh page](docs/thermal-mesh.md).
+- A bed-collision guard. Klipper did not know where the bed was, so a jog, a
+  macro or a typed `G1` could drive the nozzle, or the carriage with no tool
+  on it, into the plate. Now any move that would bring them within 0.1 mm of
+  the bed is refused with a `Bed guard:` error, and nothing moves. With a tool
+  mounted the limit is G-code Z 0.1 before any babystep, so a negative
+  babystep on a 0.1 mm first layer will be refused. The bed counts as
+  X/Y -7 to 263; the dock bay, purge chute and wipe spot (X above 263) are
+  outside it. Homing, probing, the tool-offset and station calibrations, and
+  a straight Z raise are never blocked. `SET_BED_GUARD` shows the state, and
+  `SET_BED_GUARD ENABLE=0` turns it off until a restart, for a paper test.
+  The settings are the `[ff_bed_guard]` section of `ff-toolchange.cfg`. Not
+  yet tested on hardware.
 - Bed-mesh probing lifts 2 mm above the previous trigger instead of back to one
   fixed height before every point, which shortens `BED_MESH_CALIBRATE`
   noticeably. The first move still goes to Z 5, and a calculated height under
