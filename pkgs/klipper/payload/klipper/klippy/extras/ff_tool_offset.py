@@ -233,10 +233,11 @@ class FFToolOffset:
         self.last = {}
 
         self.gcode.register_command(
-            'TOOL_CALIBRATE_TOOL_OFFSET', self.cmd_TOOL_CALIBRATE_TOOL_OFFSET,
+            'TOOL_CALIBRATE_TOOL_OFFSET',
+            self._below_bed(self.cmd_TOOL_CALIBRATE_TOOL_OFFSET),
             desc=self.cmd_TOOL_CALIBRATE_TOOL_OFFSET_help)
         self.gcode.register_command(
-            'TOOL_LOCATE_SENSOR', self.cmd_TOOL_LOCATE_SENSOR,
+            'TOOL_LOCATE_SENSOR', self._below_bed(self.cmd_TOOL_LOCATE_SENSOR),
             desc=self.cmd_TOOL_LOCATE_SENSOR_help)
         self.gcode.register_command(
             'TOOL_OFFSET_STATUS', self.cmd_TOOL_OFFSET_STATUS,
@@ -245,6 +246,19 @@ class FFToolOffset:
                                             self._handle_connect)
 
     # ---------------- plumbing ----------------
+
+    def _below_bed(self, handler):
+        """Run handler with [ff_bed_guard] suspended. The station sits
+        BELOW the bed plane and these passes run with the plate off, so
+        every approach to it is a move the guard exists to refuse. The plate
+        check, which is what makes that safe, is inside the same handler."""
+        def run(gcmd):
+            guard = self.printer.lookup_object('ff_bed_guard', None)
+            if guard is None:
+                return handler(gcmd)
+            with guard.suspended(gcmd.get_command()):
+                return handler(gcmd)
+        return run
 
     def _handle_connect(self):
         missing = []
