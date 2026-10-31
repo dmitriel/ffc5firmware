@@ -197,7 +197,7 @@ def test_samples_retract_by_the_same_lift_unless_told_otherwise(ff_bed_mesh):
 
     helper.start_probe(Gcmd())
     assert float(helper.probed_with["SAMPLE_RETRACT_DIST"]) == \
-        pytest.approx(1.35)
+        pytest.approx(0.55)
 
     helper.start_probe(Gcmd(SAMPLE_RETRACT_DIST=4))
     assert helper.probed_with["SAMPLE_RETRACT_DIST"] == "4"
@@ -280,7 +280,7 @@ def test_the_release_test_measures_saves_and_applies_the_gap(ff_bed_mesh):
 
     # Opened at 0.34 (to the step), plus one step of headroom.
     assert adapter.release_distance == pytest.approx(0.35)
-    assert adapter.lift() == pytest.approx(1.35)
+    assert adapter.lift() == pytest.approx(0.55)
     assert saved == {("ff_bed_mesh", "release_distance"): "0.350"}
     assert len(gcmd.info) == 4
 
@@ -294,3 +294,55 @@ def test_a_switch_that_never_opens_is_reported(ff_bed_mesh):
     with pytest.raises(RuntimeError, match="still triggered"):
         printer.gcode.commands["FF_PROBE_RELEASE_TEST"](Gcmd(MAX=0.5,
                                                              STEP=0.05))
+
+
+def test_an_unmeasured_probe_still_lifts_two_millimetres(ff_bed_mesh):
+    adapter, _, _ = install(ff_bed_mesh)
+    assert adapter.release_margin == pytest.approx(0.2)
+    assert adapter.lift() == pytest.approx(2.0)
+
+
+class AccelToolhead(Toolhead):
+    def __init__(self):
+        super().__init__()
+        self.max_accel = 20000.
+
+    def get_status(self, eventtime):
+        return {"max_accel": self.max_accel}
+
+
+def accel_printer(ff_bed_mesh, fail=False):
+    adapter, helper, printer = install(ff_bed_mesh, travel_accel=20000.)
+    printer.toolhead = AccelToolhead()
+    printer.toolhead.max_accel = 2000.
+    printer.objects["toolhead"] = printer.toolhead
+    printer.get_reactor = lambda: SimpleNamespace(monotonic=lambda: 0.)
+    scripts, seen = [], []
+
+    def run(script):
+        scripts.append(script)
+        printer.toolhead.max_accel = float(script.split("ACCEL=")[1])
+    printer.gcode.run_script_from_command = run
+
+    def probe(gcmd):
+        seen.append(printer.toolhead.max_accel)
+        if fail:
+            raise RuntimeError("probe failed")
+    helper.start_probe = probe
+    adapter.attach(helper)
+    return helper, scripts, seen
+
+
+def test_the_probe_run_moves_at_travel_accel_and_restores_it(ff_bed_mesh):
+    helper, scripts, seen = accel_printer(ff_bed_mesh)
+    helper.start_probe(Gcmd())
+    assert seen == [20000.]
+    assert scripts == ["SET_VELOCITY_LIMIT ACCEL=20000",
+                       "SET_VELOCITY_LIMIT ACCEL=2000"]
+
+
+def test_a_failed_probe_run_still_restores_the_accel(ff_bed_mesh):
+    helper, scripts, _ = accel_printer(ff_bed_mesh, fail=True)
+    with pytest.raises(RuntimeError):
+        helper.start_probe(Gcmd())
+    assert scripts[-1] == "SET_VELOCITY_LIMIT ACCEL=2000"

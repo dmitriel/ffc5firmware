@@ -171,7 +171,7 @@ section with just that option at the end of `printer.cfg`.
 | `heat_timeout` | 5400 | Seconds to reach a pair's targets before the sweep stops. |
 | `max_samples` | 6 | Full meshes per pair at most. |
 | `min_point_spacing` | 60 | mm between chosen points. |
-| `before_sample_gcode` | park, `G28 Z`, `BED_MESH_CLEAR`, 2000 accel, fan off | Before every mesh in the sweep and before the probe in `APPLY`. |
+| `before_sample_gcode` | park, `G28 Z`, `BED_MESH_CLEAR`, fan off | Before every mesh in the sweep and before the probe in `APPLY`. |
 | `after_sample_gcode` | 20000 accel, `G1 Z10` | After each. |
 | `data_file` | `thermal_mesh.json` beside `printer.cfg` | |
 

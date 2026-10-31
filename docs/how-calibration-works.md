@@ -204,8 +204,10 @@ surprises:
 | `default` | the working profile `BED_MESH_CALIBRATE` writes into |
 
 `START_PRINT` loads `MESH_DATA` on every print. Given `LEVEL=1` it instead
-probes a fresh mesh — dropping acceleration to 2000 for the probing run and
-putting it back afterwards — and loads `default`.
+probes a fresh mesh and loads `default`. Mesh probing travels at 500 mm/s
+and 20000 mm/s², the fastest the carriage moves anywhere else, for the probing
+run only — `[ff_bed_mesh]`'s `travel_speed` and `travel_accel`. (The stock
+application dropped acceleration to 2000 for it.)
 
 The consequence catches people out: probing a mesh by hand leaves it in
 `default`, which the automatic path never loads. To make your own mesh the

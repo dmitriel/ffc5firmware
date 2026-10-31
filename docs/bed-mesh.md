@@ -86,7 +86,7 @@ SAVE_CONFIG
 
 The printer touches the plate five times and measures how little it can lift
 each time and still have the probe let go. Every mesh after that lifts just
-that much plus a millimetre. `SAVE_CONFIG` restarts Klipper, so do it between
+that much plus 0.2 mm. `SAVE_CONFIG` restarts Klipper, so do it between
 prints. It is worth repeating after any work on the probe.
 
 ---

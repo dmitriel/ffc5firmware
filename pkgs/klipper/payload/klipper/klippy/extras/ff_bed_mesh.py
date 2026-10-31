@@ -15,9 +15,10 @@ The probe is a switch, and the only lift it needs is enough to open again.
 This adapter lifts release_distance + release_margin: above the last trigger
 before each XY move, and between samples at one point. release_distance is
 how far above its trigger height the switch re-opens; FF_PROBE_RELEASE_TEST
-measures it and SAVE_CONFIG keeps it. XY travel runs at travel_speed, the
-fastest any built-in command moves the carriage (the tool change's
-fast_feed). Z speeds are left as configured.
+measures it and SAVE_CONFIG keeps it. XY travel runs at travel_speed and
+travel_accel, the fastest any built-in command moves the carriage (the tool
+change's fast_feed, the print acceleration START_PRINT restores), for the
+length of the probe run only. Z speeds are left as configured.
 
 The first transfer still goes to a safe absolute height, and a calculated
 target below low_height_threshold falls back to recovery_move_z.
@@ -38,12 +39,13 @@ class FFBedMesh:
         self.first_move_z = config.getfloat('first_move_z', 5., minval=0.)
         # Not in the shipped cfg on purpose: FF_PROBE_RELEASE_TEST SAVE=1
         # writes it to printer.cfg's SAVE_CONFIG block, which Klipper refuses
-        # for an option an included file also sets. 1.0 + 1.0 is the 2 mm the
+        # for an option an included file also sets. 1.8 + 0.2 is the 2 mm the
         # adapter lifted before the release point was measured.
         self.release_distance = config.getfloat(
-            'release_distance', 1., minval=0.)
-        self.release_margin = config.getfloat('release_margin', 1., above=0.)
+            'release_distance', 1.8, minval=0.)
+        self.release_margin = config.getfloat('release_margin', .2, above=0.)
         self.travel_speed = config.getfloat('travel_speed', None, above=0.)
+        self.travel_accel = config.getfloat('travel_accel', None, above=0.)
         self.low_height_threshold = config.getfloat(
             'low_height_threshold', 1.)
         self.recovery_move_z = config.getfloat(
@@ -78,9 +80,10 @@ class FFBedMesh:
             desc='Measure how far the probe lifts before its switch opens')
         logging.info(
             "ff_bed_mesh: installed; first_z=%.3f lift=%.3f (release %.3f + "
-            "margin %.3f) travel_speed=%s threshold=%.3f recovery_z=%.3f",
+            "margin %.3f) travel_speed=%s travel_accel=%s threshold=%.3f "
+            "recovery_z=%.3f",
             self.first_move_z, self.lift(), self.release_distance,
-            self.release_margin, self.travel_speed,
+            self.release_margin, self.travel_speed, self.travel_accel,
             self.low_height_threshold, self.recovery_move_z)
 
     def lift(self):
@@ -103,8 +106,23 @@ class FFBedMesh:
             params = gcmd.get_command_parameters()
             if 'SAMPLE_RETRACT_DIST' not in params:
                 params['SAMPLE_RETRACT_DIST'] = '%.3f' % (self.lift(),)
-            return start_probe(gcmd)
+            if self.travel_accel is None:
+                return start_probe(gcmd)
+            # For the probe run only, put back afterwards even when it fails.
+            # Probing moves are Z, which max_z_accel limits on its own.
+            toolhead = self.printer.lookup_object('toolhead')
+            eventtime = self.printer.get_reactor().monotonic()
+            restore = toolhead.get_status(eventtime)['max_accel']
+            self._set_accel(self.travel_accel)
+            try:
+                return start_probe(gcmd)
+            finally:
+                self._set_accel(restore)
         helper.start_probe = start_probe_with_lift
+
+    def _set_accel(self, accel):
+        self.gcode.run_script_from_command(
+            'SET_VELOCITY_LIMIT ACCEL=%.0f' % (accel,))
 
     def _raise_tool(self, helper, is_first=False):
         toolhead = self.printer.lookup_object('toolhead')
@@ -132,6 +150,7 @@ class FFBedMesh:
             'release_margin': self.release_margin,
             'lift': self.lift(),
             'travel_speed': self.travel_speed,
+            'travel_accel': self.travel_accel,
             'low_height_threshold': self.low_height_threshold,
             'recovery_move_z': self.recovery_move_z,
         }
@@ -141,12 +160,14 @@ class FFBedMesh:
             "FF bed mesh: path=standard, dynamic_z=yes\n"
             "lift=%.3f (release_distance %.3f + release_margin %.3f) between "
             "points and between samples\n"
-            "travel_speed=%s, first_move_z=%.3f, "
+            "travel_speed=%s, travel_accel=%s, first_move_z=%.3f, "
             "low_height_threshold=%.3f, recovery_move_z=%.3f\n"
             "Recovery is evaluated per point and is not latched."
             % (self.lift(), self.release_distance, self.release_margin,
                'bed_mesh speed' if self.travel_speed is None
                else '%.0f mm/s' % self.travel_speed,
+               'unchanged' if self.travel_accel is None
+               else '%.0f mm/s^2' % self.travel_accel,
                self.first_move_z, self.low_height_threshold,
                self.recovery_move_z))
 
