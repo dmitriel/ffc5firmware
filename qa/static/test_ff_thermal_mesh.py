@@ -1,6 +1,7 @@
 """The thermal mesh map: sweep order, convergence, point choice and matching."""
 
 import importlib.util
+import json
 import sys
 import types
 
@@ -180,3 +181,219 @@ def test_relative_matching_ignores_a_uniform_shift(tm):
     assert relative[0] == pytest.approx(0.)
     assert (relative[1]["chamber"], relative[1]["bed"]) == (50., 60.)
     assert absolute[0] > 0.
+
+
+# -- the command, end to end against fakes ------------------------------
+
+class Gcmd:
+    error = RuntimeError
+
+    def __init__(self, **params):
+        self.params = params
+        self.info = []
+
+    def get(self, name, default=None):
+        return self.params.get(name, default)
+
+    def get_int(self, name, default=None, minval=None):
+        return int(self.params.get(name, default))
+
+    def get_float(self, name, default=None, minval=None, above=None):
+        return float(self.params.get(name, default))
+
+    def respond_info(self, msg):
+        self.info.append(msg)
+
+
+class Gcode:
+    error = RuntimeError
+
+    def __init__(self):
+        self.commands, self.scripts = {}, []
+
+    def register_command(self, name, func, desc=None):
+        self.commands[name] = func
+
+    def run_script_from_command(self, script):
+        self.scripts.append(script)
+
+    run_script = run_script_from_command
+
+    def respond_info(self, msg):
+        pass
+
+
+class Template:
+    def __init__(self, script):
+        self.script = script
+
+    def render(self):
+        return self.script
+
+
+class Macro:
+    def load_template(self, config, option, default=None):
+        return Template(config.values.get(option, default))
+
+
+class BedMeshObj:
+    def __init__(self):
+        self.mesh = None
+
+    def set_mesh(self, mesh):
+        self.mesh = mesh
+
+    def get_mesh(self):
+        return self.mesh
+
+
+class Printer:
+    def __init__(self):
+        self.gcode = Gcode()
+        self.bed_mesh = BedMeshObj()
+        self.handlers = {}
+
+    def get_reactor(self):
+        return types.SimpleNamespace(monotonic=lambda: 0.)
+
+    def lookup_object(self, name, default=None):
+        return {"gcode": self.gcode, "bed_mesh": self.bed_mesh}.get(
+            name, default)
+
+    def load_object(self, config, name):
+        return Macro()
+
+    def get_start_args(self):
+        return {}
+
+    def register_event_handler(self, name, func):
+        self.handlers[name] = func
+
+
+class Config:
+    error = RuntimeError
+
+    def __init__(self, printer, **values):
+        self.printer, self.values = printer, values
+
+    def get_printer(self):
+        return self.printer
+
+    def get(self, option, default=None, **limits):
+        return self.values.get(option, default)
+
+    getfloat = getint = get
+
+
+class Clock:
+    NOW = 0.
+
+    def __init__(self):
+        self.t = 0.
+
+    def monotonic(self):
+        return self.t
+
+    def pause(self, waketime):
+        self.t = max(self.t + .001, waketime)
+
+    def register_callback(self, cb):
+        cb(self.t)
+
+
+class Heater:
+    def __init__(self):
+        self.target = 0.
+
+    def get_status(self, eventtime):
+        return {"temperature": self.target}
+
+
+class SweepPrinter(Printer):
+    """Heaters reach any target at once; each mesh probe settles over time."""
+
+    def __init__(self):
+        super().__init__()
+        self.clock = Clock()
+        self.heaters = {"heater_bed": Heater(), "chamber_heater": Heater()}
+        self.probes = []
+        self.gcode.run_script = self.run_script
+
+    def get_reactor(self):
+        return self.clock
+
+    def is_shutdown(self):
+        return False
+
+    def lookup_object(self, name, default=None):
+        objects = {
+            "gcode": self.gcode, "bed_mesh": self.bed_mesh,
+            "heater_bed": self.heaters["heater_bed"],
+            "heater_generic chamber_heater": self.heaters["chamber_heater"],
+            "toolhead": types.SimpleNamespace(
+                get_status=lambda t: {"homed_axes": "xyz"}),
+            "idle_timeout": types.SimpleNamespace(idle_timeout=600.)}
+        return objects.get(name, default)
+
+    def run_script(self, script):
+        self.gcode.scripts.append(script)
+        words = script.split()
+        if words and words[0] == "SET_HEATER_TEMPERATURE":
+            args = dict(w.split("=") for w in words[1:])
+            self.heaters[args["HEATER"]].target = float(args["TARGET"])
+        elif script == "BED_MESH_CALIBRATE":
+            c = self.heaters["chamber_heater"].target
+            b = self.heaters["heater_bed"].target
+            key = (c, b)
+            n = sum(1 for k in self.probes if k == key)
+            self.probes.append(key)
+            drift = 0.05 / (2 ** n)          # halves with every sample
+            m = [[z + drift for z in row] for row in matrix_at(c, b)]
+            self.bed_mesh.mesh = types.SimpleNamespace(
+                get_probed_matrix=lambda: m,
+                get_mesh_params=lambda: PARAMS)
+
+
+def test_the_sweep_maps_every_pair_until_it_settles(tm, tmp_path):
+    path = tmp_path / "thermal_mesh.json"
+    printer = SweepPrinter()
+    obj = tm.FFThermalMesh(Config(printer, data_file=str(path),
+                                  max_samples=6, min_point_spacing=60.,
+                                  bed_tolerance=1., chamber_tolerance=2.,
+                                  heat_timeout=100.))
+    printer.handlers["klippy:connect"]()
+    printer.gcode.commands["THERMAL_MESH_SWEEP"](Gcmd(
+        BED_MIN=60, BED_MAX=100, BED_STEP=20, CHAMBER_MIN=30, CHAMBER_MAX=50,
+        CHAMBER_STEP=10, SOAK=300, CHAMBER_SOAK=900, THRESHOLD=0.01))
+
+    data = json.loads(path.read_text())
+    assert obj.status["state"] == "done", obj.status
+    pairs = [(e["chamber"], e["bed"]) for e in data["entries"]]
+    assert pairs == tm.sweep_plan([60., 80., 100.], [30., 40., 50.])
+    # drift 0.05, 0.025, 0.0125, 0.00625: the 4th sample is the first within
+    # 0.01 of the one before it.
+    assert {e["samples"] for e in data["entries"]} == {4}
+    assert all(e["converged"] for e in data["entries"])
+    assert len(data["analysis"]["points"]) == 4
+    # Heaters are off and the idle timeout is back afterwards.
+    assert printer.heaters["heater_bed"].target == 0.
+    assert printer.heaters["chamber_heater"].target == 0.
+    assert printer.gcode.scripts[-1] == "SET_IDLE_TIMEOUT TIMEOUT=600"
+
+
+def test_a_resumed_sweep_skips_the_stored_pairs(tm, tmp_path):
+    path = tmp_path / "thermal_mesh.json"
+    stored = mesh_map(tm, chambers=(30.,), beds=(60., 80.))
+    path.write_text(json.dumps({"version": 1, "mesh_params": PARAMS,
+                                "entries": stored}))
+    printer = SweepPrinter()
+    tm.FFThermalMesh(Config(printer, data_file=str(path), max_samples=6,
+                            min_point_spacing=60., bed_tolerance=1.,
+                            chamber_tolerance=2., heat_timeout=100.))
+    printer.handlers["klippy:connect"]()
+    printer.gcode.commands["THERMAL_MESH_SWEEP"](Gcmd(
+        BED_MIN=60, BED_MAX=100, BED_STEP=20, CHAMBER_MIN=30, CHAMBER_MAX=30,
+        SOAK=0, THRESHOLD=0.01, RESUME=1))
+
+    assert set(printer.probes) == {(30., 100.)}
+    assert len(json.loads(path.read_text())["entries"]) == 3

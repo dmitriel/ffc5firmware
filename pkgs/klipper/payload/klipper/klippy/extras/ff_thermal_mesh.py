@@ -36,9 +36,20 @@ The module level functions hold all of the arithmetic and touch nothing in
 klippy; qa/static/test_ff_thermal_mesh.py tests them directly.
 """
 
+import json
+import logging
 import math
+import os
 
 DATA_VERSION = 1
+# Far beyond any sweep; restored to the configured value when the sweep ends.
+SWEEP_IDLE_TIMEOUT = 864000.
+
+
+class SweepAborted(Exception):
+    pass
+
+
 ######################################################################
 # Pure helpers: planning, convergence, analysis, matching
 ######################################################################
@@ -381,3 +392,448 @@ def effective_mesh(weights, params, points=None, measured=None,
             for c in range(len(matrix[r])):
                 matrix[r][c] += surface(*node_xy(params, r, c))
     return matrix, residuals
+
+
+######################################################################
+# Klipper glue
+######################################################################
+
+class FFThermalMesh:
+    def __init__(self, config):
+        self.printer = config.get_printer()
+        self.reactor = self.printer.get_reactor()
+        self.gcode = self.printer.lookup_object('gcode')
+        self.bed_heater = config.get('bed_heater', 'heater_bed')
+        self.chamber_heater = config.get('chamber_heater', 'chamber_heater')
+        self.chamber_sensor = config.get('chamber_sensor', None)
+        self.bed_tolerance = config.getfloat('bed_tolerance', 1., above=0.)
+        self.chamber_tolerance = config.getfloat(
+            'chamber_tolerance', 2., above=0.)
+        self.heat_timeout = config.getfloat('heat_timeout', 5400., above=0.)
+        self.max_samples = config.getint('max_samples', 6, minval=2)
+        self.min_spacing = config.getfloat(
+            'min_point_spacing', 60., minval=0.)
+        data_file = config.get('data_file', None)
+        if data_file is None:
+            cfg = self.printer.get_start_args().get('config_file', '')
+            data_file = os.path.join(os.path.dirname(cfg) or '.',
+                                     'thermal_mesh.json')
+        self.data_file = os.path.expanduser(data_file)
+        gcode_macro = self.printer.load_object(config, 'gcode_macro')
+        self.before_sample = gcode_macro.load_template(
+            config, 'before_sample_gcode', 'G28 Z')
+        self.after_sample = gcode_macro.load_template(
+            config, 'after_sample_gcode', '')
+        self.bed_mesh = None
+        self.job = None
+        self.status = {'state': 'idle', 'step': 0, 'total': 0, 'phase': '',
+                       'bed_target': 0., 'chamber_target': 0.,
+                       'last_delta': None, 'samples': 0, 'remaining': 0.,
+                       'message': ''}
+        self.printer.register_event_handler('klippy:connect',
+                                            self._handle_connect)
+        self.printer.register_event_handler('klippy:shutdown',
+                                            self._handle_shutdown)
+        for name in ('SWEEP', 'ABORT', 'STATUS', 'ANALYZE'):
+            cmd = 'THERMAL_MESH_' + name
+            func = getattr(self, 'cmd_' + cmd)
+            self.gcode.register_command(cmd, func,
+                                        desc=getattr(self, func.__name__
+                                                     + '_help'))
+
+    def _handle_connect(self):
+        self.bed_mesh = self.printer.lookup_object('bed_mesh', None)
+
+    def _handle_shutdown(self):
+        if self.job is not None:
+            self.job['abort'] = True
+
+    def get_status(self, eventtime):
+        status = dict(self.status)
+        status['data_file'] = self.data_file
+        return status
+
+    # -- data file -------------------------------------------------------
+    def _load(self):
+        try:
+            with open(self.data_file) as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as e:
+            raise self.gcode.error("thermal mesh: cannot read %s: %s"
+                                   % (self.data_file, e))
+        if data.get('version') != DATA_VERSION:
+            raise self.gcode.error("thermal mesh: %s is version %s, expected %d"
+                                   % (self.data_file, data.get('version'),
+                                      DATA_VERSION))
+        return data
+
+    def _save(self, data):
+        tmp = self.data_file + '.tmp'
+        with open(tmp, 'w') as f:
+            json.dump(data, f, indent=1)
+        os.replace(tmp, self.data_file)
+
+    def _require_map(self, need_points=True):
+        data = self._load()
+        if not data or not data.get('entries'):
+            raise self.gcode.error(
+                "thermal mesh: no map in %s; run THERMAL_MESH_SWEEP first"
+                % (self.data_file,))
+        if need_points and not data.get('analysis', {}).get('points'):
+            raise self.gcode.error(
+                "thermal mesh: no probe points chosen; run THERMAL_MESH_ANALYZE")
+        return data
+
+    # -- heaters ---------------------------------------------------------
+    def _has_chamber_heater(self):
+        return self.printer.lookup_object(
+            'heater_generic ' + self.chamber_heater, None) is not None
+
+    def _read_temp(self, obj_name, eventtime):
+        obj = self.printer.lookup_object(obj_name, None)
+        if obj is None:
+            return None
+        return obj.get_status(eventtime).get('temperature')
+
+    def _bed_temp(self, eventtime):
+        return self._read_temp(self.bed_heater, eventtime)
+
+    def _chamber_temp(self, eventtime):
+        names = [self.chamber_sensor] if self.chamber_sensor else [
+            'heater_generic ' + self.chamber_heater,
+            'temperature_sensor chamber']
+        for name in names:
+            t = self._read_temp(name, eventtime)
+            if t is not None:
+                return t
+        return None
+
+    def _set_bed(self, target):
+        self.gcode.run_script('SET_HEATER_TEMPERATURE HEATER=%s TARGET=%.1f'
+                              % (self.bed_heater, target))
+
+    def _set_chamber(self, target):
+        # Through ff-chamber.cfg's SET_HEATER_TEMPERATURE, which owns the
+        # chamber_loop_fan coupling and the per-model gate.
+        if target > 0. or self._has_chamber_heater():
+            self.gcode.run_script(
+                'SET_HEATER_TEMPERATURE HEATER=%s TARGET=%.1f'
+                % (self.chamber_heater, target))
+
+    # -- sweep job -------------------------------------------------------
+    def _check_abort(self):
+        job = self.job
+        if job['abort'] or self.printer.is_shutdown():
+            raise SweepAborted()
+        stats = self.printer.lookup_object('print_stats', None)
+        if stats is not None:
+            state = stats.get_status(self.reactor.monotonic()).get('state')
+            if state in ('printing', 'paused'):
+                raise SweepAborted("a print started")
+
+    def _sleep(self, seconds):
+        end = self.reactor.monotonic() + seconds
+        while True:
+            self._check_abort()
+            now = self.reactor.monotonic()
+            self.status['remaining'] = max(0., end - now)
+            if now >= end:
+                return
+            self.reactor.pause(min(end, now + 1.))
+
+    def _wait_for_temps(self, bed, chamber):
+        start = self.reactor.monotonic()
+        while True:
+            self._check_abort()
+            now = self.reactor.monotonic()
+            bed_now = self._bed_temp(now)
+            ok = bed_now is not None and abs(bed_now - bed) <= self.bed_tolerance
+            if chamber > 0.:
+                # The chamber can only be heated: a hot bed may carry it past
+                # the target, which is recorded rather than waited out.
+                ch = self._chamber_temp(now)
+                ok = ok and ch is not None and ch >= chamber - \
+                    self.chamber_tolerance
+            if ok:
+                return
+            if now - start > self.heat_timeout:
+                raise self.gcode.error(
+                    "thermal mesh: bed %.1f / chamber %.1f not reached in %ds"
+                    % (bed, chamber, self.heat_timeout))
+            self.status['remaining'] = 0.
+            self.reactor.pause(now + 1.)
+
+    def _probe_full_mesh(self):
+        self.gcode.run_script(self.before_sample.render())
+        self.gcode.run_script('BED_MESH_CALIBRATE')
+        mesh = self.bed_mesh.get_mesh() if self.bed_mesh else None
+        if mesh is None:
+            raise self.gcode.error("thermal mesh: BED_MESH_CALIBRATE "
+                                   "produced no mesh")
+        matrix = mesh.get_probed_matrix()
+        params = dict(mesh.get_mesh_params())
+        self.gcode.run_script(self.after_sample.render())
+        return matrix, params
+
+    def _check_params(self, data, params):
+        known = data.get('mesh_params')
+        if known is None:
+            data['mesh_params'] = params
+            return
+        for key in ('x_count', 'y_count', 'min_x', 'max_x', 'min_y', 'max_y'):
+            if abs(float(known[key]) - float(params[key])) > 1e-3:
+                raise self.gcode.error(
+                    "thermal mesh: mesh %s changed from %s to %s during the "
+                    "map; start a new sweep" % (key, known[key], params[key]))
+
+    def _sample_until_stable(self, data, threshold):
+        job = self.job
+        previous, delta = None, None
+        for n in range(1, self.max_samples + 1):
+            self._check_abort()
+            self.status['samples'] = n
+            matrix, params = self._probe_full_mesh()
+            self._check_params(data, params)
+            if previous is not None:
+                delta = mean_abs_delta(previous, matrix)
+                self.status['last_delta'] = delta
+                self.gcode.respond_info(
+                    "thermal mesh: chamber %.1f bed %.1f sample %d: "
+                    "mean |dZ| %.4f mm (want < %.4f)"
+                    % (job['chamber'], job['bed'], n, delta, threshold))
+                if delta < threshold:
+                    return average_matrices([previous, matrix]), n, delta, True
+            previous = matrix
+        self.gcode.respond_info(
+            "thermal mesh: chamber %.1f bed %.1f did not settle in %d samples; "
+            "keeping the last two" % (job['chamber'], job['bed'], n))
+        return average_matrices([previous, matrix]), n, delta, False
+
+    def _set_idle_timeout(self, value):
+        self.gcode.run_script('SET_IDLE_TIMEOUT TIMEOUT=%.0f' % (value,))
+
+    def _run_sweep(self, eventtime):
+        job = self.job
+        data = job['data']
+        idle = self.printer.lookup_object('idle_timeout', None)
+        idle_restore = getattr(idle, 'idle_timeout', None)
+        done = set(_key(e['chamber'], e['bed']) for e in data['entries'])
+        state, message = 'done', ''
+        try:
+            self._set_idle_timeout(SWEEP_IDLE_TIMEOUT)
+            prev_chamber = None
+            for idx, (chamber, bed) in enumerate(job['plan']):
+                self.status['step'] = idx + 1
+                if _key(chamber, bed) in done:
+                    continue
+                self._check_abort()
+                job['chamber'], job['bed'] = chamber, bed
+                self.status.update(phase='heating', bed_target=bed,
+                                   chamber_target=chamber, last_delta=None,
+                                   samples=0)
+                chamber_changed = chamber != prev_chamber
+                if chamber_changed:
+                    self._set_chamber(chamber)
+                self._set_bed(bed)
+                self._wait_for_temps(bed, chamber)
+                self.status['phase'] = 'soaking'
+                self._sleep(job['chamber_soak'] if chamber_changed
+                            else job['soak'])
+                self.status['phase'] = 'sampling'
+                now = self.reactor.monotonic()
+                bed_start, ch_start = self._bed_temp(now), \
+                    self._chamber_temp(now)
+                matrix, samples, delta, converged = self._sample_until_stable(
+                    data, job['threshold'])
+                now = self.reactor.monotonic()
+                data['entries'].append({
+                    'chamber': chamber, 'bed': bed,
+                    'bed_measured': [bed_start, self._bed_temp(now)],
+                    'chamber_measured': [ch_start, self._chamber_temp(now)],
+                    'samples': samples, 'delta': delta,
+                    'converged': converged, 'matrix': matrix})
+                self._save(data)
+                prev_chamber = chamber
+            if self._analyze(data, job['chamber_points'], job['bed_points'],
+                             self.min_spacing, report=True) is None:
+                message = "map has a single temperature; nothing to analyze"
+        except SweepAborted as e:
+            state, message = 'aborted', str(e) or 'aborted'
+        except Exception as e:
+            logging.exception("thermal mesh sweep")
+            state, message = 'error', str(e)
+        finally:
+            try:
+                if not (job['keep_heat'] and state == 'done'):
+                    self._set_bed(0.)
+                    self._set_chamber(0.)
+                if idle_restore is not None:
+                    self._set_idle_timeout(idle_restore)
+            except Exception:
+                logging.exception("thermal mesh sweep cleanup")
+            self.status.update(state=state, phase='', remaining=0.,
+                               message=message)
+            self.job = None
+            self.gcode.respond_info(
+                "thermal mesh: sweep %s after %d/%d pairs (%d stored in %s)%s"
+                % (state, self.status['step'], self.status['total'],
+                   len(data['entries']), self.data_file,
+                   ': ' + message if message else ''))
+
+    cmd_THERMAL_MESH_SWEEP_help = (
+        "Map the bed mesh over bed and chamber temperature")
+
+    def cmd_THERMAL_MESH_SWEEP(self, gcmd):
+        if self.job is not None:
+            raise gcmd.error("thermal mesh: a sweep is already running")
+        if self.bed_mesh is None:
+            raise gcmd.error("thermal mesh: needs [bed_mesh]")
+        homed = self.printer.lookup_object('toolhead').get_status(
+            self.reactor.monotonic()).get('homed_axes', '')
+        if 'x' not in homed or 'y' not in homed:
+            raise gcmd.error("thermal mesh: home X and Y first (G28)")
+        bed_min = gcmd.get_float('BED_MIN')
+        bed_max = gcmd.get_float('BED_MAX', bed_min)
+        bed_step = gcmd.get_float('BED_STEP', 10., above=0.)
+        ch_min = gcmd.get_float('CHAMBER_MIN', 0., minval=0.)
+        ch_max = gcmd.get_float('CHAMBER_MAX', ch_min)
+        ch_step = gcmd.get_float('CHAMBER_STEP', 10., above=0.)
+        soak = gcmd.get_float('SOAK', 600., minval=0.)
+        chamber_soak = gcmd.get_float('CHAMBER_SOAK', soak, minval=0.)
+        threshold = gcmd.get_float('THRESHOLD', 0.01, above=0.)
+        resume = gcmd.get_int('RESUME', 0)
+        try:
+            beds = temperature_steps(bed_min, bed_max, bed_step)
+            chambers = temperature_steps(ch_min, ch_max, ch_step)
+        except ValueError as e:
+            raise gcmd.error("thermal mesh: %s" % (e,))
+        if chambers[-1] > 0. and not self._has_chamber_heater():
+            raise gcmd.error("thermal mesh: this printer has no [heater_generic"
+                             " %s]; leave CHAMBER_MIN/MAX at 0"
+                             % (self.chamber_heater,))
+        sweep = {'bed_temps': beds, 'chamber_temps': chambers, 'soak': soak,
+                 'chamber_soak': chamber_soak, 'threshold': threshold}
+        data = self._load() if resume else None
+        if data is None:
+            if not resume and os.path.exists(self.data_file):
+                os.replace(self.data_file, self.data_file + '.bak')
+                gcmd.respond_info("thermal mesh: previous map kept as %s.bak"
+                                  % (self.data_file,))
+            data = {'version': DATA_VERSION, 'mesh_params': None,
+                    'entries': []}
+        data['sweep'] = sweep
+        data.pop('analysis', None)
+        plan = sweep_plan(beds, chambers)
+        self.job = {'plan': plan, 'data': data, 'abort': False,
+                    'soak': soak, 'chamber_soak': chamber_soak,
+                    'threshold': threshold,
+                    'keep_heat': gcmd.get_int('KEEP_HEAT', 0),
+                    'chamber_points': gcmd.get_int('CHAMBER_POINTS', 2,
+                                                   minval=0),
+                    'bed_points': gcmd.get_int('BED_POINTS', 2, minval=0),
+                    'chamber': None, 'bed': None}
+        self.status.update(state='running', step=0, total=len(plan),
+                           message='')
+        stored = len(data['entries'])
+        gcmd.respond_info(
+            "thermal mesh: %d pairs (chamber %s x bed %s), %d already stored; "
+            "soak %ds, chamber soak %ds, settle < %.4f mm. "
+            "THERMAL_MESH_STATUS to follow, THERMAL_MESH_ABORT to stop."
+            % (len(plan), _fmt_list(chambers), _fmt_list(beds), stored,
+               soak, chamber_soak, threshold))
+        self.reactor.register_callback(self._run_sweep)
+
+    cmd_THERMAL_MESH_ABORT_help = "Stop a running thermal mesh sweep"
+
+    def cmd_THERMAL_MESH_ABORT(self, gcmd):
+        if self.job is None:
+            gcmd.respond_info("thermal mesh: no sweep is running")
+            return
+        self.job['abort'] = True
+        gcmd.respond_info("thermal mesh: stopping after the current step")
+
+    cmd_THERMAL_MESH_STATUS_help = "Show the thermal mesh sweep and map"
+
+    def cmd_THERMAL_MESH_STATUS(self, gcmd):
+        s = self.status
+        lines = ["thermal mesh: %s" % (s['state'],)]
+        if s['state'] == 'running':
+            lines.append("pair %d/%d: chamber %.1f bed %.1f, %s"
+                         % (s['step'], s['total'], s['chamber_target'],
+                            s['bed_target'], s['phase']))
+            if s['phase'] == 'soaking':
+                lines.append("soak remaining %ds" % (s['remaining'],))
+            if s['phase'] == 'sampling':
+                lines.append("sample %d, last mean |dZ| %s"
+                             % (s['samples'], 'n/a' if s['last_delta'] is None
+                                else '%.4f mm' % s['last_delta']))
+        elif s['message']:
+            lines.append(s['message'])
+        data = self._load()
+        if data and data.get('entries'):
+            lines.append("map: %d entries in %s"
+                         % (len(data['entries']), self.data_file))
+            for p in data.get('analysis', {}).get('points', []):
+                lines.append("  point (%.1f, %.1f) %s" % (p['x'], p['y'],
+                                                          p['axis']))
+        gcmd.respond_info("\n".join(lines))
+
+    # -- analysis --------------------------------------------------------
+    def _analyze(self, data, chamber_points, bed_points, min_spacing,
+                 report=False):
+        entries = data['entries']
+        chamber_map, bed_map = sensitivity_maps(entries)
+        if chamber_map is None and bed_map is None:
+            return None
+        params = data['mesh_params']
+        points = select_points(params, chamber_map, bed_map, chamber_points,
+                               bed_points, min_spacing)
+        data['analysis'] = {'chamber_rms': chamber_map, 'bed_rms': bed_map,
+                            'points': points, 'min_spacing': min_spacing}
+        self._save(data)
+        if report:
+            lines = ["thermal mesh: sensitivity (um/degC, peak / median):"]
+            for name, smap in (('chamber', chamber_map), ('bed', bed_map)):
+                if smap is None:
+                    lines.append("  %s: single target, not mapped" % (name,))
+                    continue
+                flat = sorted(v for row in smap for v in row)
+                lines.append("  %s: %.2f / %.2f" % (
+                    name, flat[-1] * 1000., flat[len(flat) // 2] * 1000.))
+            lines.append("probe points:")
+            for p in points:
+                lines.append(
+                    "  (%.1f, %.1f) for %s: chamber %.2f, bed %.2f um/degC"
+                    % (p['x'], p['y'], p['axis'], p['chamber_rms'] * 1000.,
+                       p['bed_rms'] * 1000.))
+            self.gcode.respond_info("\n".join(lines))
+        return points
+
+    cmd_THERMAL_MESH_ANALYZE_help = (
+        "Find the mesh points most sensitive to bed and chamber temperature")
+
+    def cmd_THERMAL_MESH_ANALYZE(self, gcmd):
+        if self.job is not None:
+            raise gcmd.error("thermal mesh: a sweep is running")
+        data = self._require_map(need_points=False)
+        try:
+            points = self._analyze(
+                data, gcmd.get_int('CHAMBER_POINTS', 2, minval=0),
+                gcmd.get_int('BED_POINTS', 2, minval=0),
+                gcmd.get_float('MIN_SPACING', self.min_spacing, minval=0.),
+                report=True)
+        except ValueError as e:
+            raise gcmd.error("thermal mesh: %s" % (e,))
+        if points is None:
+            raise gcmd.error("thermal mesh: the map has a single temperature "
+                             "pair; there is nothing to compare")
+
+
+def _fmt_list(values):
+    return "[%s]" % (", ".join("%g" % v for v in values),)
+
+
+def load_config(config):
+    return FFThermalMesh(config)
