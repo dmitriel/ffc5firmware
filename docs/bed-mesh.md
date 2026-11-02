@@ -91,6 +91,16 @@ prints. It is worth repeating after any work on the probe.
 
 ---
 
+## Absorbing the mesh in the first layers instead
+
+Normally the nozzle follows the mesh, so the plate's shape is copied into
+the bottom of the part. The [flow mesh](flow-mesh.md) does the opposite: the
+nozzle stays level and the first layers are laid thicker or thinner to make
+up the difference. It is optional; `FLOW_MESH_TOGGLE ENABLE=1` turns it on
+for the next print.
+
+---
+
 ## A mesh for each temperature
 
 A plate probed hot is a different shape from one probed cold, and on the

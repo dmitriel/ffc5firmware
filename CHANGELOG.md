@@ -8,6 +8,14 @@ both printer models or through every real-world workflow.
 
 ### Added
 
+- Flow mesh, a second bed-mesh strategy: the nozzle stays on the flat sliced
+  plane and the first layers absorb the plate's unevenness in their
+  thickness, with extrusion scaled to match. A layer is never laid thinner
+  than 0.1 mm or thicker than the nozzle diameter; past those the nozzle
+  follows the mesh just far enough, and the remainder goes into the next
+  layer, until the effective mesh is flat. `FLOW_MESH_TOGGLE ENABLE=1` uses it
+  for the next print. Off by default and not yet tested on hardware. See
+  [the flow mesh page](docs/flow-mesh.md).
 - Thermal mesh map: `THERMAL_MESH_SWEEP` probes full meshes at every bed and
   chamber temperature pair in a range (serpentine order, heat-soaked, repeated
   until two agree within a threshold) and stores them in `thermal_mesh.json`;
