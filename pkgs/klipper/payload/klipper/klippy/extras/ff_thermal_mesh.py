@@ -293,55 +293,92 @@ def bilinear_weights(entries, chamber, bed):
     return weights, chamber, bed
 
 
-def fit_bilinear(entries, points, measured, relative=False, steps=20):
+def _closest_on_line(base, slope, target):
+    """t in [0, 1] minimising |base + t*slope - target|^2."""
+    num = sum(sl * (tg - b) for b, sl, tg in zip(base, slope, target))
+    den = sum(sl * sl for sl in slope)
+    if den <= 0.:
+        return 0.
+    return min(1., max(0., num / den))
+
+
+def fit_bilinear(entries, points, measured, relative=False, steps=20,
+                 checkpoint=None):
     """Find the temperature pair whose interpolated mesh best fits the probe.
 
     The map is a grid over (chamber, bed). Inside every cell whose four
     corners were sampled, the interpolated signature is bilinear in the cell
-    coordinates u, v, so a coarse grid search over u, v followed by a finer
-    one around the best hit finds the minimum without any solver. Returns a
-    dict with rms, chamber, bed and weights [(weight, entry)].
+    coordinates u (chamber) and v (bed): A + B*u + C*v + D*u*v, one value
+    per point. For a fixed v that is a straight line in u, so the best u has
+    a closed form; this scans v in `steps`, solves u at each, then refines
+    by alternating between the two. Cheap enough for a slow host, and
+    checkpoint() (if given) is called after every cell, which klippy uses to
+    let the reactor run. Returns a dict with rms, chamber, bed and weights
+    [(weight, entry)].
     """
     chambers, beds, table = build_grid(entries)
     by_key = {_key(e['chamber'], e['bed']): e for e in entries}
     sigs = {k: signature(m, points) for k, m in table.items()}
+    target = _centered(measured) if relative else list(measured)
 
-    def evaluate(ci, bi, u, v):
-        corners = _bilinear_corners(chambers, beds, ci, bi, u, v)
-        pred = [sum(w * sigs[k][i] for w, k in corners)
-                for i in range(len(points))]
-        return residual_rms(pred, measured, relative), corners
-
-    def search(ci, bi, u0, u1, v0, v1, n):
-        best = None
-        us = [u0 + (u1 - u0) * i / n for i in range(n + 1)]
-        vs = [v0 + (v1 - v0) * i / n for i in range(n + 1)]
-        if ci[0] == ci[1]:
-            us = [0.]
-        if bi[0] == bi[1]:
-            vs = [0.]
-        for u in us:
-            for v in vs:
-                rms, corners = evaluate(ci, bi, u, v)
-                if best is None or rms < best[0]:
-                    best = (rms, u, v, corners)
-        return best
+    def prep(values):
+        return _centered(values) if relative else values
 
     best = None
     for ci in _cells(chambers):
         for bi in _cells(beds):
-            keys = set((chambers[i], beds[j]) for i in ci for j in bi)
-            if not keys.issubset(table):
+            keys = [(chambers[a], beds[b]) for a in ci for b in bi]
+            if not set(keys).issubset(table):
                 continue
-            hit = search(ci, bi, 0., 1., 0., 1., steps)
-            if best is None or hit[0] < best[0][0]:
-                best = (hit, ci, bi)
+            s00 = sigs[(chambers[ci[0]], beds[bi[0]])]
+            s10 = sigs[(chambers[ci[1]], beds[bi[0]])]
+            s01 = sigs[(chambers[ci[0]], beds[bi[1]])]
+            s11 = sigs[(chambers[ci[1]], beds[bi[1]])]
+            n = range(len(points))
+            A = prep([s00[i] for i in n])
+            B = prep([s10[i] - s00[i] for i in n])
+            C = prep([s01[i] - s00[i] for i in n])
+            D = prep([s11[i] - s10[i] - s01[i] + s00[i] for i in n])
+
+            def at(u, v):
+                pred = [A[i] + B[i] * u + C[i] * v + D[i] * u * v for i in n]
+                return math.sqrt(sum((p - t) ** 2 for p, t in
+                                     zip(pred, target)) / len(target))
+
+            def best_u(v):
+                if ci[0] == ci[1]:
+                    return 0.
+                return _closest_on_line([A[i] + C[i] * v for i in n],
+                                        [B[i] + D[i] * v for i in n], target)
+
+            def best_v(u):
+                if bi[0] == bi[1]:
+                    return 0.
+                return _closest_on_line([A[i] + B[i] * u for i in n],
+                                        [C[i] + D[i] * u for i in n], target)
+
+            vs = [0.] if bi[0] == bi[1] else [k / float(steps)
+                                              for k in range(steps + 1)]
+            hit = None
+            for v in vs:
+                u = best_u(v)
+                rms = at(u, v)
+                if hit is None or rms < hit[0]:
+                    hit = (rms, u, v)
+            rms, u, v = hit
+            for _ in range(8):
+                v = best_v(u)
+                u = best_u(v)
+                rms = min(rms, at(u, v))
+            rms = at(u, v)
+            if best is None or rms < best[0]:
+                best = (rms, u, v, ci, bi)
+            if checkpoint is not None:
+                checkpoint()
     if best is None:
         raise ValueError("no fully sampled cell in the map")
-    (rms, u, v, _), ci, bi = best
-    h = 1. / steps
-    rms, u, v, corners = search(ci, bi, max(0., u - h), min(1., u + h),
-                                max(0., v - h), min(1., v + h), steps)
+    rms, u, v, ci, bi = best
+    corners = _bilinear_corners(chambers, beds, ci, bi, u, v)
     c0, c1 = chambers[ci[0]], chambers[ci[1]]
     b0, b1 = beds[bi[0]], beds[bi[1]]
     return {'rms': rms,
@@ -847,6 +884,9 @@ class FFThermalMesh:
                              "pair; there is nothing to compare")
 
     # -- apply -----------------------------------------------------------
+    def _let_reactor_run(self):
+        self.reactor.pause(self.reactor.monotonic() + 0.001)
+
     def _probe_finalize(self, offsets, positions):
         self._probed = (offsets, positions)
 
@@ -909,8 +949,14 @@ class FFThermalMesh:
                 self.gcode.run_script_from_command(self.before_sample.render())
                 measured = self._probe_points(gcmd, points)
                 self.gcode.run_script_from_command(self.after_sample.render())
+                # The matching below is pure Python on a slow host. With a
+                # move still queued (after_sample_gcode's G1 Z10) a stall
+                # of a second ends in "Timer too close", so empty the queue
+                # first, and let the reactor run between map cells.
+                self.printer.lookup_object('toolhead').wait_moves()
                 if method == 'bilinear':
-                    fit = fit_bilinear(entries, points, measured, relative)
+                    fit = fit_bilinear(entries, points, measured, relative,
+                                       checkpoint=self._let_reactor_run)
                     weights = fit['weights']
                     lines.append("fit chamber %.1f bed %.1f, rms %.4f mm"
                                  % (fit['chamber'], fit['bed'], fit['rms']))

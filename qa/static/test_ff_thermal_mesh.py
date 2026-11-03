@@ -294,13 +294,18 @@ class Printer:
         self.gcode = Gcode()
         self.bed_mesh = BedMeshObj()
         self.handlers = {}
+        self.events = []
+        self.toolhead = types.SimpleNamespace(
+            wait_moves=lambda: self.events.append("wait_moves"))
 
     def get_reactor(self):
-        return types.SimpleNamespace(monotonic=lambda: 0.)
+        return types.SimpleNamespace(
+            monotonic=lambda: 0.,
+            pause=lambda t: self.events.append("pause"))
 
     def lookup_object(self, name, default=None):
-        return {"gcode": self.gcode, "bed_mesh": self.bed_mesh}.get(
-            name, default)
+        return {"gcode": self.gcode, "bed_mesh": self.bed_mesh,
+                "toolhead": self.toolhead}.get(name, default)
 
     def load_object(self, config, name):
         return Macro()
@@ -490,3 +495,37 @@ def test_the_point_probe_borrows_the_mesh_probing_travel(tm, tmp_path):
                                   data_file=str(tmp_path / "m.json")))
     printer.handlers["klippy:connect"]()
     assert attached == [obj.probe_helper]
+
+
+def test_bilinear_apply_empties_the_queue_then_yields_while_it_fits(
+        tm, tmp_path):
+    entries = mesh_map(tm)
+    points = points_for(tm, entries)
+    path = tmp_path / "thermal_mesh.json"
+    path.write_text(json.dumps({"version": 1, "mesh_params": PARAMS,
+                                "entries": entries,
+                                "analysis": {"points": points}}))
+    printer = Printer()
+    obj = tm.FFThermalMesh(Config(printer, data_file=str(path)))
+    printer.handlers["klippy:connect"]()
+    obj.probe_helper.z_at = lambda x, y: bed_shape(45., 70., x, y)
+
+    gcmd = Gcmd(DRY_RUN=1)
+    printer.gcode.commands["THERMAL_MESH_APPLY"](gcmd)
+
+    # Nothing queued while Python works, and the reactor runs once per
+    # cell of the 3 x 3 map: four cells.
+    assert printer.events[0] == "wait_moves"
+    assert printer.events.count("pause") == 4
+    assert "fit chamber 45.0 bed 70.0" in gcmd.info[-1]
+
+
+def test_the_fit_is_exact_on_a_bilinear_bed(tm):
+    entries = mesh_map(tm)
+    points = points_for(tm, entries)
+    for chamber, bed in ((31., 99.), (47.3, 64.1), (50., 60.)):
+        measured = [bed_shape(chamber, bed, p["x"], p["y"]) for p in points]
+        fit = tm.fit_bilinear(entries, points, measured)
+        assert fit["chamber"] == pytest.approx(chamber, abs=0.05)
+        assert fit["bed"] == pytest.approx(bed, abs=0.05)
+        assert fit["rms"] < 1e-6
