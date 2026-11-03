@@ -36,17 +36,19 @@ both printer models or through every real-world workflow.
   `SET_BED_GUARD ENABLE=0` turns it off until a restart, for a paper test.
   The settings are the `[ff_bed_guard]` section of `ff-toolchange.cfg`. Not
   yet tested on hardware.
-- Bed-mesh probing lifts only as far as the probe switch needs to open again,
-  plus 0.2 mm, above the previous trigger -- between points and between
-  samples at a point -- instead of back to one fixed height, and travels X/Y
+- Bed-mesh probing lifts only as far as the probe needs to be ready again,
+  plus 0.2 mm, between the touches at one point, and at least 1 mm
+  (`min_travel_lift`) before moving to the next, instead of back to one fixed
+  height; and travels X/Y
   at 500 mm/s and 20000 mm/s², the fastest the carriage moves anywhere else,
   instead of the stock 200 mm/s and 2000 mm/s². Each point is touched twice
   rather than three times, and a third time only if the two disagree, keeping
   whichever pair agrees; the point starts over only when none does. Other
   probing keeps three. Z speeds and
   acceleration are unchanged. Run
-  `FF_PROBE_RELEASE_TEST SAVE=1` then `SAVE_CONFIG` once to measure where the
-  switch opens; until then the lift is 2 mm. The first move still goes to Z 5,
+  `FF_PROBE_RELEASE_TEST SAVE=1` then `SAVE_CONFIG` once to measure it -- for
+  the Creator 5's momentary eddy trigger, the lowest start height whose
+  touches repeat those from 3 mm; until then the lift is 2 mm. The first move still goes to Z 5,
   and a calculated height under Z 1 falls back to Z 3. `FF_BED_MESH_STATUS`
   shows the settings; they are the `[ff_bed_mesh]` section of
   `ff-print-macros.cfg`. Contributed by

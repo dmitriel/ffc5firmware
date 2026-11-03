@@ -54,6 +54,9 @@ class Gcmd:
     def get_command_parameters(self):
         return self.params
 
+    def get(self, name, default=None):
+        return self.params.get(name, default)
+
     def get_int(self, name, default=None, minval=None):
         return int(self.params.get(name, default))
 
@@ -242,7 +245,7 @@ class SwitchProbe:
         return self.triggered
 
     def get_probe_params(self, gcmd=None):
-        return {"lift_speed": 10.}
+        return {"lift_speed": 10., "samples_tolerance": 0.02}
 
     def start_probe_session(self, gcmd):
         return self
@@ -285,7 +288,8 @@ def test_the_release_test_measures_saves_and_applies_the_gap(ff_bed_mesh):
     assert adapter.release_distance == pytest.approx(0.35)
     assert adapter.lift() == pytest.approx(0.55)
     assert saved == {("ff_bed_mesh", "release_distance"): "0.350"}
-    assert len(gcmd.info) == 4
+    assert "holds its trigger" in gcmd.info[0]
+    assert sum("opened 0.34" in m for m in gcmd.info) == 3
 
 
 def test_a_switch_that_never_opens_is_reported(ff_bed_mesh):
@@ -502,3 +506,86 @@ def test_the_session_is_released_when_the_mesh_fails(ff_bed_mesh):
     with pytest.raises(RuntimeError):
         inner.start_probe(Gcmd())
     assert "start_probe_session" not in vars(real)
+
+
+class TapProbe(SwitchProbe):
+    """A momentary trigger: open again the moment it stops. Starting a touch
+    closer than `ready` lands it late; closer than `stuck` fails it."""
+
+    def __init__(self, toolhead, ready, stuck=0.):
+        super().__init__(toolhead, gap=0.)
+        self.ready, self.stuck = ready, stuck
+        self.z = None
+
+    def _query(self, print_time):
+        return False
+
+    def run_probe(self, gcmd):
+        start = self.toolhead.z
+        lift = None if self.z is None else start - self.z
+        if lift is not None and lift < self.stuck:
+            raise RuntimeError("Probe triggered prior to movement")
+        late = lift is not None and lift < self.ready
+        self.z = 0.1 + (0.05 if late else 0.)
+        self.toolhead.z = self.z
+
+    def pull_probed_results(self):
+        return [[0., 0., self.z]]
+
+
+def tap_printer(ff_bed_mesh, ready, stuck=0.):
+    adapter, _, printer = install(ff_bed_mesh)
+    printer.toolhead = MovingToolhead()
+    printer.toolhead.z = 5.
+    printer.objects["toolhead"] = printer.toolhead
+    printer.objects["probe"] = TapProbe(printer.toolhead, ready, stuck)
+    printer.command_error = RuntimeError
+    return adapter, printer
+
+
+def test_a_momentary_probe_is_measured_by_where_it_still_repeats(ff_bed_mesh):
+    adapter, printer = tap_printer(ff_bed_mesh, ready=0.3, stuck=0.15)
+    gcmd = Gcmd(SAMPLES=3)
+    printer.gcode.commands["FF_PROBE_RELEASE_TEST"](gcmd)
+
+    assert "momentary" in gcmd.info[0]
+    assert adapter.release_distance == pytest.approx(0.3)
+    assert adapter.lift() == pytest.approx(0.5)
+    assert any("0.10 mm: failed" in m for m in gcmd.info)
+    assert any("0.20 mm: off by 0.05" in m for m in gcmd.info)
+    assert any("0.30 mm: within" in m for m in gcmd.info)
+
+
+def test_a_momentary_probe_that_never_repeats_keeps_the_default(ff_bed_mesh):
+    # Late from anything under 2.5 mm: every candidate below MAX misses.
+    adapter, printer = tap_printer(ff_bed_mesh, ready=2.5)
+    with pytest.raises(RuntimeError, match="keep the default"):
+        printer.gcode.commands["FF_PROBE_RELEASE_TEST"](Gcmd(SAMPLES=2))
+    assert adapter.release_distance == pytest.approx(1.8)
+
+
+def test_travel_between_points_lifts_at_least_the_minimum(ff_bed_mesh):
+    adapter, helper, printer = install(ff_bed_mesh, release_distance=0.01,
+                                       low_height_threshold=-5.)
+    printer.toolhead.z = 2.0
+    helper._raise_tool(False)
+    assert adapter.lift() == pytest.approx(0.21)          # between samples
+    assert helper.moves[0][0][2] == pytest.approx(3.0)    # 1 mm, not 0.21
+
+
+class StoppedOffToolhead(RetractToolhead):
+    """Stopped a few microns off the point, as the real carriage does."""
+
+    def get_position(self):
+        return [12.998, 3.996, self.z, 0.]
+
+
+def test_the_sample_retract_goes_straight_up_from_where_it_stopped(
+        ff_bed_mesh):
+    adapter, _, printer = install(ff_bed_mesh, samples=2)
+    printer.toolhead = StoppedOffToolhead()
+    printer.objects["toolhead"] = printer.toolhead
+    session = ScriptedSession([-0.134, -0.130])
+    ff_bed_mesh.TiebreakSession(adapter, session).run_probe(Gcmd())
+    (coord, _speed), = printer.toolhead.retracts
+    assert coord[:2] == [12.998, 3.996]      # pure Z: nothing for the guard

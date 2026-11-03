@@ -84,9 +84,11 @@ FF_PROBE_RELEASE_TEST SAVE=1
 SAVE_CONFIG
 ```
 
-The printer touches the plate five times and measures how little it can lift
-each time and still have the probe let go. Every mesh after that lifts just
-that much plus 0.2 mm. `SAVE_CONFIG` restarts Klipper, so do it between
+The printer touches the plate five times from 3 mm up, then again from
+lower and lower start heights, and keeps the lowest one whose touches still
+land in the same place. Between the touches at one point, every mesh after
+that lifts just that much plus 0.2 mm; moving on to the next point it always
+lifts at least 1 mm, in case the plate is higher there. `SAVE_CONFIG` restarts Klipper, so do it between
 prints. It is worth repeating after any work on the probe.
 
 ---

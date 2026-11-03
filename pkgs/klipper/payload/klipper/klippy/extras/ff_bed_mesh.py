@@ -11,11 +11,16 @@ bed_mesh's own speed. On the Creator 5 the Z part of that is most of the
 mesh's time: the probe descends at 3 mm/s, so every millimetre lifted costs a
 third of a second on the way back down, per sample, per point.
 
-The probe is a switch, and the only lift it needs is enough to open again.
-This adapter lifts release_distance + release_margin: above the last trigger
-before each XY move, and between samples at one point. release_distance is
-how far above its trigger height the switch re-opens; FF_PROBE_RELEASE_TEST
-measures it and SAVE_CONFIG keeps it. XY travel runs at travel_speed and
+The only lift a touch needs is enough for the probe to be ready to trigger
+again. This adapter lifts release_distance + release_margin above the last
+trigger between samples at one point, and at least min_travel_lift before
+moving on to the next point, where a warped plate can be higher.
+release_distance is that ready distance: for a held switch, how far above
+its trigger it opens again; for a momentary trigger like the Creator 5's
+(the eboard pulses the line on an eddy-current tap), the smallest start
+height from which touches still land where touches from a few mm do.
+FF_PROBE_RELEASE_TEST finds out which kind it is, measures it, and
+SAVE_CONFIG keeps it. XY travel runs at travel_speed and
 travel_accel, the fastest any built-in command moves the carriage (the tool
 change's fast_feed, the print acceleration START_PRINT restores), for the
 length of the probe run only. Z speeds and accelerations are left as
@@ -55,6 +60,8 @@ class FFBedMesh:
         self.release_distance = config.getfloat(
             'release_distance', 1.8, minval=0.)
         self.release_margin = config.getfloat('release_margin', .2, above=0.)
+        self.min_travel_lift = config.getfloat('min_travel_lift', 1.,
+                                               minval=0.)
         self.travel_speed = config.getfloat('travel_speed', None, above=0.)
         self.travel_accel = config.getfloat('travel_accel', None, above=0.)
         self.samples = config.getint('samples', None, minval=1)
@@ -166,7 +173,7 @@ class FFBedMesh:
             # Recalculate after every trigger. Recovery is therefore not
             # latched: as soon as trigger_z + lift is safe again, the
             # following transfer automatically returns to the lower height.
-            target_z = current_z + self.lift()
+            target_z = current_z + max(self.lift(), self.min_travel_lift)
             if target_z < self.low_height_threshold:
                 target_z = self.recovery_move_z
             target_z = max(target_z, current_z + .001)
@@ -180,6 +187,7 @@ class FFBedMesh:
             'release_distance': self.release_distance,
             'release_margin': self.release_margin,
             'lift': self.lift(),
+            'min_travel_lift': self.min_travel_lift,
             'travel_speed': self.travel_speed,
             'travel_accel': self.travel_accel,
             'samples': self.samples,
@@ -192,12 +200,13 @@ class FFBedMesh:
         gcmd.respond_info(
             "FF bed mesh: path=standard, dynamic_z=yes\n"
             "lift=%.3f (release_distance %.3f + release_margin %.3f) between "
-            "points and between samples; samples per point: %s, tiebreak: "
-            "up to %d more\n"
+            "samples, at least %.3f between points; samples per point: %s, "
+            "tiebreak: up to %d more\n"
             "travel_speed=%s, travel_accel=%s, first_move_z=%.3f, "
             "low_height_threshold=%.3f, recovery_move_z=%.3f\n"
             "Recovery is evaluated per point and is not latched."
             % (self.lift(), self.release_distance, self.release_margin,
+               self.min_travel_lift,
                '[probe] default' if self.samples is None else self.samples,
                self.tiebreak_samples if self.samples is not None else 0,
                'bed_mesh speed' if self.travel_speed is None
@@ -207,50 +216,39 @@ class FFBedMesh:
                self.first_move_z, self.low_height_threshold,
                self.recovery_move_z))
 
-    # FF_PROBE_RELEASE_TEST [SAMPLES=5] [STEP=0.01] [MAX=3] [SAVE=0]
+    # FF_PROBE_RELEASE_TEST [SAMPLES=5] [STEP=0.01] [MAX=3]
+    #     [LIFTS=0.1,0.2,0.3,0.5,0.75,1,1.5,2] [SAVE=0]
     def cmd_FF_PROBE_RELEASE_TEST(self, gcmd):
         samples = gcmd.get_int('SAMPLES', 5, minval=1)
         step = gcmd.get_float('STEP', 0.01, above=0.)
         limit = gcmd.get_float('MAX', 3., above=0.)
+        try:
+            lifts = sorted(float(v) for v in gcmd.get(
+                'LIFTS', '0.1,0.2,0.3,0.5,0.75,1,1.5,2').split(',')
+                if v.strip())
+        except ValueError:
+            raise gcmd.error("ff_bed_mesh: LIFTS is a list of mm, "
+                             "e.g. 0.2,0.5,1")
         probe = self.printer.lookup_object('probe', None)
         if probe is None:
             raise gcmd.error("ff_bed_mesh: no [probe]")
-        toolhead = self.printer.lookup_object('toolhead')
-        lift_speed = probe.get_probe_params()['lift_speed']
-        one = self.gcode.create_gcode_command(
-            '', '', {'SAMPLES': '1', 'SAMPLE_RETRACT_DIST': '%.3f' % limit})
-        releases = []
-        for n in range(samples):
-            session = probe.start_probe_session(one)
-            try:
-                session.run_probe(one)
-                trigger_z = session.pull_probed_results()[0][2]
-            finally:
-                session.end_probe_session()
-            x, y = toolhead.get_position()[:2]
-            z = trigger_z
-            while True:
-                toolhead.wait_moves()
-                if not probe.mcu_probe.query_endstop(
-                        toolhead.get_last_move_time()):
-                    break
-                if z - trigger_z >= limit:
-                    raise gcmd.error(
-                        "ff_bed_mesh: probe still triggered %.2f mm above "
-                        "the trigger; check it, or raise MAX" % (limit,))
-                z += step
-                toolhead.manual_move([x, y, z], lift_speed)
-            releases.append(z - trigger_z)
-            gcmd.respond_info("sample %d: triggered at z=%.4f, opened %.3f mm "
-                              "above" % (n + 1, trigger_z, releases[-1]))
-            toolhead.manual_move([x, y, trigger_z + limit], lift_speed)
-        worst = max(releases)
-        mean = sum(releases) / len(releases)
-        self.release_distance = round(worst + step, 3)
-        msg = ("probe opens up to %.3f mm above its trigger (mean %.3f over "
-               "%d). release_distance=%.3f for this session: lift is now "
-               "%.3f mm."
-               % (worst, mean, samples, self.release_distance, self.lift()))
+        test = _ReleaseTest(self.printer, self.gcode, probe, limit)
+        test.touch()
+        if test.triggered():
+            gcmd.respond_info("probe holds its trigger after stopping: "
+                              "measuring where it opens")
+            distance = test.measure_release(gcmd, samples, step)
+        else:
+            gcmd.respond_info(
+                "probe released as soon as it stopped: a momentary trigger, "
+                "not a held switch. Finding the lowest start height that "
+                "still touches where a %.1f mm start does" % (limit,))
+            distance = test.measure_ready_lift(gcmd, samples, lifts)
+        self.release_distance = round(distance, 3)
+        msg = ("release_distance=%.3f for this session: %.3f mm between "
+               "samples, at least %.3f mm between points."
+               % (self.release_distance, self.lift(),
+                  max(self.lift(), self.min_travel_lift)))
         if gcmd.get_int('SAVE', 0):
             configfile = self.printer.lookup_object('configfile')
             configfile.set(self.name, 'release_distance',
@@ -259,6 +257,106 @@ class FFBedMesh:
         else:
             msg += " Run with SAVE=1, then SAVE_CONFIG, to keep it."
         gcmd.respond_info(msg)
+
+
+class _ReleaseTest:
+    """Touches at one X/Y, every lift a pure Z move from where it stopped."""
+
+    def __init__(self, printer, gcode, probe, limit):
+        self.printer = printer
+        self.probe = probe
+        self.limit = limit
+        self.toolhead = printer.lookup_object('toolhead')
+        self.lift_speed = probe.get_probe_params()['lift_speed']
+        self.tolerance = probe.get_probe_params()['samples_tolerance']
+        self.one = gcode.create_gcode_command(
+            '', '', {'SAMPLES': '1', 'SAMPLE_RETRACT_DIST': '%.3f' % limit})
+        self.last = None
+
+    def touch(self):
+        session = self.probe.start_probe_session(self.one)
+        try:
+            session.run_probe(self.one)
+            self.last = session.pull_probed_results()[0][2]
+        finally:
+            session.end_probe_session()
+        return self.last
+
+    def lift_to(self, z):
+        x, y = self.toolhead.get_position()[:2]
+        self.toolhead.manual_move([x, y, z], self.lift_speed)
+
+    def triggered(self):
+        self.toolhead.wait_moves()
+        return self.probe.mcu_probe.query_endstop(
+            self.toolhead.get_last_move_time())
+
+    def measure_release(self, gcmd, samples, step):
+        """A held switch: step up from each trigger until it opens."""
+        releases = []
+        for n in range(samples):
+            if n:
+                self.lift_to(self.last + self.limit)
+                self.touch()
+            trigger_z = z = self.last
+            while self.triggered():
+                if z - trigger_z >= self.limit:
+                    raise gcmd.error(
+                        "ff_bed_mesh: probe still triggered %.2f mm above "
+                        "the trigger; check it, or raise MAX" % (self.limit,))
+                z += step
+                self.lift_to(z)
+            releases.append(z - trigger_z)
+            gcmd.respond_info("sample %d: triggered at z=%.4f, opened %.3f mm "
+                              "above" % (n + 1, trigger_z, releases[-1]))
+        self.lift_to(self.last + self.limit)
+        worst = max(releases)
+        gcmd.respond_info("probe opens up to %.3f mm above its trigger "
+                          "(mean %.3f over %d)"
+                          % (worst, sum(releases) / len(releases), samples))
+        return worst + step
+
+    def measure_ready_lift(self, gcmd, samples, lifts):
+        """A momentary trigger: the lowest start that still repeats."""
+        reference = []
+        for _ in range(samples):
+            self.lift_to(self.last + self.limit)
+            reference.append(self.touch())
+        ref = sum(reference) / len(reference)
+        spread = max(reference) - min(reference)
+        gcmd.respond_info("from %.1f mm: z=%.4f, spread %.4f over %d"
+                          % (self.limit, ref, spread, samples))
+        if spread > self.tolerance:
+            raise gcmd.error(
+                "ff_bed_mesh: touches from %.1f mm already spread %.4f, more "
+                "than samples_tolerance %.4f; nothing to compare against"
+                % (self.limit, spread, self.tolerance))
+        for lift in lifts:
+            if lift >= self.limit:
+                break
+            worst, failure = 0., None
+            for _ in range(samples):
+                self.lift_to(self.last + lift)
+                try:
+                    z = self.touch()
+                except self.printer.command_error as e:
+                    failure = str(e)
+                    break
+                worst = max(worst, abs(z - ref))
+                if worst > self.tolerance:
+                    break
+            self.lift_to(self.last + self.limit)
+            if failure is not None:
+                gcmd.respond_info("from %.2f mm: failed (%s)" % (lift, failure))
+            elif worst > self.tolerance:
+                gcmd.respond_info("from %.2f mm: off by %.4f" % (lift, worst))
+            else:
+                gcmd.respond_info("from %.2f mm: within %.4f over %d -- ready"
+                                  % (lift, worst, samples))
+                return lift
+        raise gcmd.error(
+            "ff_bed_mesh: no start height below %.1f mm repeated within "
+            "%.4f; keep the default" % (self.limit, self.tolerance))
 
 
 def closest_agreeing(positions, count, tolerance):
@@ -313,7 +411,6 @@ class TiebreakSession:
         tolerance = params['samples_tolerance']
         limit = count + self.adapter.tiebreak_samples
         toolhead = self.adapter.printer.lookup_object('toolhead')
-        probexy = toolhead.get_position()[:2]
         retries = pretriggered = 0
         positions = []
         while True:
@@ -339,8 +436,13 @@ class TiebreakSession:
                 gcmd.respond_info("Probe samples %.4f apart; one more"
                                   % (max(p[2] for p in positions)
                                      - min(p[2] for p in positions),))
+            # Straight up from where it stopped, not back to the point's own
+            # X/Y: the stop is a few microns off it, and a move that is not purely
+            # vertical is judged by ff_bed_guard from its low end -- the
+            # touch itself, which on a low spot is below the bed plane.
+            here = toolhead.get_position()[:2]
             toolhead.manual_move(
-                probexy + [pos[2] + params['sample_retract_dist']],
+                here + [pos[2] + params['sample_retract_dist']],
                 params['lift_speed'])
         session.results.append(combine(chosen, params['samples_result']))
 
