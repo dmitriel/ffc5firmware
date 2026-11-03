@@ -529,3 +529,32 @@ def test_the_fit_is_exact_on_a_bilinear_bed(tm):
         assert fit["chamber"] == pytest.approx(chamber, abs=0.05)
         assert fit["bed"] == pytest.approx(bed, abs=0.05)
         assert fit["rms"] < 1e-6
+
+
+def test_a_print_without_a_map_falls_back_to_the_saved_mesh(tm, tmp_path):
+    printer = Printer()
+    tm.FFThermalMesh(Config(printer, data_file=str(tmp_path / "none.json")))
+    printer.handlers["klippy:connect"]()
+    gcmd = Gcmd(FALLBACK="MESH_DATA", PREPARE=0)
+    printer.gcode.commands["THERMAL_MESH_APPLY"](gcmd)
+    assert printer.gcode.scripts == ["BED_MESH_PROFILE LOAD=MESH_DATA"]
+    assert "loading MESH_DATA instead" in gcmd.info[0]
+
+
+def test_prepare_0_skips_the_park_and_homing(tm, tmp_path):
+    entries = mesh_map(tm)
+    points = points_for(tm, entries)
+    path = tmp_path / "thermal_mesh.json"
+    path.write_text(json.dumps({"version": 1, "mesh_params": PARAMS,
+                                "entries": entries,
+                                "analysis": {"points": points}}))
+    printer = Printer()
+    obj = tm.FFThermalMesh(Config(printer, data_file=str(path),
+                                  before_sample_gcode="G28 Z",
+                                  after_sample_gcode="G1 Z10"))
+    printer.handlers["klippy:connect"]()
+    obj.probe_helper.z_at = lambda x, y: bed_shape(50., 80., x, y)
+    printer.gcode.commands["THERMAL_MESH_APPLY"](
+        Gcmd(METHOD="nearest", PREPARE=0))
+    assert "G28 Z" not in printer.gcode.scripts
+    assert printer.gcode.scripts == ["G1 Z10"]

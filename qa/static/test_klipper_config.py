@@ -443,10 +443,40 @@ def test_the_toggle_chooses_between_a_new_mesh_and_the_saved_one(model):
             action_raise_error=_raise).splitlines())
 
     saved, probed = render(0), render(1)
-    assert "BED_MESH_PROFILE LOAD=MESH_DATA" in saved
+    assert "_FF_SAVED_MESH" in saved
     assert not any(c.startswith("BED_MESH_CALIBRATE") for c in saved)
     assert any(c.startswith("BED_MESH_CALIBRATE ADAPTIVE=1") for c in probed)
-    assert "BED_MESH_PROFILE LOAD=MESH_DATA" not in probed
+    assert "_FF_SAVED_MESH" not in probed
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("thermal", [0, 1])
+def test_the_saved_mesh_is_mesh_data_or_the_thermal_map(model, thermal):
+    extra = {"gcode_macro THERMAL_MESH_TOGGLE": {
+        "enabled": thermal, "method": "bilinear", "match": "absolute",
+        "correct": "none"}}
+    out, info = _run(model, "_FF_SAVED_MESH", has_heater=False, extra=extra)
+    if thermal:
+        assert out == ["THERMAL_MESH_APPLY PREPARE=0 METHOD=bilinear "
+                       "MATCH=absolute CORRECT=none FALLBACK=MESH_DATA"]
+        assert "THERMAL" in info[0]
+    else:
+        assert out == ["BED_MESH_PROFILE LOAD=MESH_DATA"]
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_the_thermal_toggle_flips_and_validates(model):
+    on, info = _run(model, "THERMAL_MESH_TOGGLE", has_heater=False)
+    assert on == ["SET_GCODE_VARIABLE MACRO=THERMAL_MESH_TOGGLE "
+                  "VARIABLE=enabled VALUE=1"]
+    with pytest.raises(AssertionError, match="ENABLE must be 0 or 1"):
+        _run(model, "THERMAL_MESH_TOGGLE ENABLE=2", has_heater=False)
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_a_print_says_which_mesh_strategy_it_uses(model):
+    _out, info = _run(model, "_FF_FLOW_MESH_BEGIN", has_heater=False)
+    assert "Bed mesh strategy: standard" in info[0]
 
 
 @pytest.mark.parametrize("model", MODELS)

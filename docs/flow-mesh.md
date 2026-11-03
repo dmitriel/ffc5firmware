@@ -13,13 +13,23 @@ low spot and thinner over a high one, with the extrusion scaled to match, so
 its top comes out flat.
 
 ```gcode
-FLOW_MESH_TOGGLE ENABLE=1      ; the next print uses it (not kept across restarts)
+FLOW_MESH_TOGGLE ENABLE=1      ; prints use it, until a restart
 FLOW_MESH_TOGGLE ENABLE=0      ; back to standard
 FLOW_MESH_STATUS               ; during a print: layer, mesh left, flat since layer N
 ```
 
 `START_PRINT` and `ADAPTIVE_MESH` start it once the mesh is loaded and the
-first tool is mounted; `END_PRINT` and a cancel stop it. You can also start
+first tool is mounted, and say `flow mesh: on`; otherwise they say
+`Bed mesh strategy: standard`. `END_PRINT` and a cancel stop it.
+
+The toggle resets to off on every restart, including the
+`FIRMWARE_RESTART` after a shutdown. To make the flow mesh the default, add
+this at the end of `printer.cfg`:
+
+```
+[gcode_macro FLOW_MESH_TOGGLE]
+variable_enabled: 1
+``` You can also start
 it yourself after the mesh is loaded:
 `FLOW_MESH_START [MIN_THICKNESS=0.1] [MAX_THICKNESS=0.4]`.
 

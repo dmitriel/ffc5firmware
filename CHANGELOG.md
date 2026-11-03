@@ -16,6 +16,9 @@ both printer models or through every real-world workflow.
   layer, until the effective mesh is flat. `FLOW_MESH_TOGGLE ENABLE=1` uses it
   for the next print. Off by default and not yet tested on hardware. See
   [the flow mesh page](docs/flow-mesh.md).
+- `THERMAL_MESH_TOGGLE ENABLE=1` makes prints that would load `MESH_DATA`
+  match the thermal map instead, falling back to `MESH_DATA` without one.
+  Every print now says which bed-mesh strategy it uses.
 - Thermal mesh map: `THERMAL_MESH_SWEEP` probes full meshes at every bed and
   chamber temperature pair in a range (serpentine order, heat-soaked, repeated
   until two agree within a threshold) and stores them in `thermal_mesh.json`;
@@ -34,7 +37,9 @@ both printer models or through every real-world workflow.
   outside it. Homing, probing, the tool-offset and station calibrations, and
   a straight Z raise are never blocked. `SET_BED_GUARD` shows the state, and
   `SET_BED_GUARD ENABLE=0` turns it off until a restart, for a paper test.
-  The settings are the `[ff_bed_guard]` section of `ff-toolchange.cfg`. Not
+  The settings are the `[ff_bed_guard]` section of `ff-toolchange.cfg`. With a
+  mesh active it allows bed_mesh's own `split_delta_z` (0.025 mm) on top,
+  since bed_mesh itself lets a long line sag that far below the mesh. Not
   yet tested on hardware.
 - Bed-mesh probing lifts only as far as the probe needs to be ready again,
   plus 0.2 mm, between the touches at one point, and at least 1 mm

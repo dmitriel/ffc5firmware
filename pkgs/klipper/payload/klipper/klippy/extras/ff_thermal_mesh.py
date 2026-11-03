@@ -931,7 +931,17 @@ class FFThermalMesh:
             raise gcmd.error("thermal mesh: CORRECT must be one of %s"
                              % (', '.join(CORRECTIONS),))
         relative = gcmd.get('MATCH', 'absolute').lower() == 'relative'
-        data = self._require_map(need_points=method != 'temperature')
+        fallback = gcmd.get('FALLBACK', None)
+        try:
+            data = self._require_map(need_points=method != 'temperature')
+        except self.gcode.error as e:
+            if not fallback:
+                raise
+            # A print start: no map is no reason to refuse the print.
+            gcmd.respond_info("%s -- loading %s instead" % (e, fallback))
+            self.gcode.run_script_from_command(
+                'BED_MESH_PROFILE LOAD=%s' % (fallback,))
+            return
         entries, params = data['entries'], data['mesh_params']
         points = data.get('analysis', {}).get('points', [])
         measured = None
@@ -946,7 +956,9 @@ class FFThermalMesh:
                 lines.append("lookup at chamber %.1f bed %.1f" % (chamber, bed))
                 correct = 'none'
             else:
-                self.gcode.run_script_from_command(self.before_sample.render())
+                if gcmd.get_int('PREPARE', 1):
+                    self.gcode.run_script_from_command(
+                        self.before_sample.render())
                 measured = self._probe_points(gcmd, points)
                 self.gcode.run_script_from_command(self.after_sample.render())
                 # The matching below is pure Python on a slow host. With a

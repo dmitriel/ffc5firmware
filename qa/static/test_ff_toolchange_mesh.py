@@ -176,4 +176,5 @@ def test_print_start_loads_or_probes_mesh_after_homing():
     assert gcode.index("BED_MESH_CLEAR") < gcode.index("G28")
     assert gcode.index("G28") < gcode.index("BED_MESH_CALIBRATE")
     assert gcode.index("G28") < gcode.index("BED_MESH_PROFILE LOAD=default")
-    assert gcode.index("G28") < gcode.index("BED_MESH_PROFILE LOAD=MESH_DATA")
+    # The saved mesh (MESH_DATA, or the thermal map) is _FF_SAVED_MESH's.
+    assert gcode.index("G28") < gcode.index("_FF_SAVED_MESH")

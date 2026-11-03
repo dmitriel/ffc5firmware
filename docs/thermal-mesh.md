@@ -93,6 +93,30 @@ mostly noise — and the four points are saved in the map file.
 
 ## 3. Use it: `THERMAL_MESH_APPLY`
 
+### In prints
+
+```gcode
+THERMAL_MESH_TOGGLE ENABLE=1
+```
+
+From then on, a print that would load the saved `MESH_DATA` — `START_PRINT`
+without `LEVEL=1`, or `ADAPTIVE_MESH` with adaptive probing off — probes the
+map's four points instead, after its soak and Z homing, and loads the
+effective mesh. The console says `Bed mesh mode: THERMAL`. Without a map or
+chosen points it says so and loads `MESH_DATA`, so a print never fails for
+lack of one.
+
+The toggle is not kept across a restart. To make it the default, add this at
+the end of `printer.cfg`; `variable_method`, `variable_match` and
+`variable_correct` set the options below the same way:
+
+```
+[gcode_macro THERMAL_MESH_TOGGLE]
+variable_enabled: 1
+```
+
+### By hand
+
 In place of `BED_MESH_PROFILE LOAD=…` or `BED_MESH_CALIBRATE`, after the
 heat soak:
 
@@ -102,7 +126,9 @@ THERMAL_MESH_APPLY [METHOD=bilinear] [MATCH=absolute] [CORRECT=none] [SAVE=<prof
 
 It runs `before_sample_gcode` (park, `G28 Z`, as the sweep did before every
 mesh), probes the four points, compares them with every mesh in the map,
-builds an effective mesh and makes it the active one. `SAVE=` also stores it
+builds an effective mesh and makes it the active one. `PREPARE=0` skips the
+park and `G28 Z` when the caller has just done both; `FALLBACK=<profile>`
+loads that profile, with a message, when there is no map. `SAVE=` also stores it
 as a bed-mesh profile; `DRY_RUN=1` only reports. The report names the
 matched temperatures, the blend, and the residual at each point — the
 distance between what was probed and the mesh that was loaded.
