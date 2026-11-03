@@ -600,9 +600,17 @@ def shipped_section():
     return {k: float(v) for k, v in cp.items("ff_bed_mesh")}
 
 
-def test_shipped_settings_travel_one_mm_above_a_low_touch(ff_bed_mesh):
+@pytest.mark.parametrize("measured, travel_z", [
+    (None, 1.866),      # unmeasured: the 2 mm lift
+    (0.3, 0.866),       # measured: the 1 mm minimum wins over 0.5
+])
+def test_shipped_settings_never_send_a_low_touch_to_z3(ff_bed_mesh, measured,
+                                                       travel_z):
     # The sweep's first point: a touch at -0.134 on a plate around Z 0.
-    _, helper, printer = install(ff_bed_mesh, **shipped_section())
+    settings = shipped_section()
+    if measured is not None:
+        settings["release_distance"] = measured
+    _, helper, printer = install(ff_bed_mesh, **settings)
     printer.toolhead.z = -0.134
     helper._raise_tool(False)
-    assert helper.moves[0][0][2] == pytest.approx(0.866)   # not Z 3
+    assert helper.moves[0][0][2] == pytest.approx(travel_z)
