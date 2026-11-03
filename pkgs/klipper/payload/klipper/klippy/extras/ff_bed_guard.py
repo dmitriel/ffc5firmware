@@ -41,7 +41,11 @@
 #     TOOL_LOCATE_SENSOR, whose station sits BELOW the bed plane and which
 #     run with the plate removed (ff_tool_offset.py).
 #   * a pure Z raise: moving away from the bed is never refused, so a head
-#     left low by an exempt sequence can always be lifted out.
+#     left low by an exempt sequence can always be lifted out. "Pure" allows
+#     RAISE_XY_TOLERANCE of X/Y: a probe stops a few microns off its point
+#     (stepper rounding), and a retract back to the point's exact X/Y would
+#     otherwise be judged from its low end -- the touch itself, which on a
+#     low spot of the plate is below the bed plane.
 #   * an unhomed Z: there is no position to compare. An unhomed X or Y is
 #     treated as over the bed.
 #   * SET_BED_GUARD ENABLE=0, until ENABLE=1 or a restart.
@@ -62,6 +66,7 @@ import math
 SAMPLE_STEP = 5.0
 MAX_SAMPLES = 200
 EPSILON = 1e-6
+RAISE_XY_TOLERANCE = 0.05
 
 
 class FFBedGuard:
@@ -239,7 +244,7 @@ class FFBedGuard:
             return
         start, end = move.start_pos, move.end_pos
         dx, dy, dz = (end[i] - start[i] for i in range(3))
-        if abs(dx) < EPSILON and abs(dy) < EPSILON and dz >= 0.:
+        if dz >= 0. and math.hypot(dx, dy) <= RAISE_XY_TOLERANCE:
             return
         span = self._clip(start, end, xy_homed)
         if span is None:

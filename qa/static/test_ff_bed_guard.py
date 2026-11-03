@@ -236,6 +236,21 @@ def test_pure_z_raise_is_always_allowed(ff_bed_guard):
     printer.toolhead.move([100., 100., 2.0, 0.])
 
 
+def test_a_raise_off_a_low_touch_with_step_rounding_is_allowed(ff_bed_guard):
+    # The probe stopped at (12.998, 3.996), 0.134 below the plane; the
+    # retract goes back up to the point it was sent to.
+    printer, _guard, _tc = install(ff_bed_guard, mounted=-1)
+    printer.toolhead.pos = [12.998, 3.996, -0.134, 0.]
+    printer.toolhead.move([13.000, 4.000, 0.076, 0.])
+
+
+def test_a_raise_that_also_travels_is_still_checked(ff_bed_guard):
+    printer, _guard, _tc = install(ff_bed_guard, mounted=-1)
+    printer.toolhead.pos = [100., 100., -0.134, 0.]
+    with pytest.raises(CommandError):
+        printer.toolhead.move([101., 100., 0.076, 0.])
+
+
 def test_homing_moves_are_exempt(ff_bed_guard):
     printer, _guard, _tc = install(ff_bed_guard, mounted=-1)
     printer.toolhead.special_queuing_state = "Drip"
