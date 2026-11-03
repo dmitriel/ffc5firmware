@@ -230,6 +230,44 @@ def test_mesh_raises_the_limit(ff_bed_guard):
     printer.toolhead.move([100., 100., 3.6, 0.])
 
 
+class DomeMesh(Mesh):
+    """Flat except a bump rising to `height` midway along X 158..182."""
+
+    def __init__(self, height):
+        super().__init__(0.)
+        self.height = height
+
+    def calc_z(self, x, y):
+        return max(0., self.height * (1. - ((x - 170.) / 12.) ** 2))
+
+    def get_z_range(self):
+        return 0., self.height
+
+
+def test_bed_mesh_split_sag_on_a_first_layer_line_is_allowed(ff_bed_guard):
+    # The refused print move: 0.113 above the mesh at both ends of a 24 mm
+    # line that bed_mesh did not split, the mesh 0.028 higher in between.
+    printer, guard, _tc = install(ff_bed_guard, mesh=DomeMesh(0.028))
+    assert guard.mesh_tolerance == pytest.approx(0.025)
+    printer.toolhead.pos = [158., 60., 3.313, 0.]
+    printer.toolhead.move([182., 60., 3.313, 0.])
+
+
+def test_a_real_dip_below_the_limit_is_still_refused(ff_bed_guard):
+    printer, _guard, _tc = install(ff_bed_guard, mesh=DomeMesh(0.05))
+    printer.toolhead.pos = [158., 60., 3.313, 0.]
+    with pytest.raises(CommandError, match="mesh tolerance"):
+        printer.toolhead.move([182., 60., 3.313, 0.])
+
+
+def test_mesh_tolerance_follows_bed_mesh_split_delta_z(ff_bed_guard):
+    printer, guard, _tc = install(ff_bed_guard, mesh=DomeMesh(0.))
+    assert guard.mesh_tolerance == pytest.approx(0.025)
+    _p, guard, _tc = install(ff_bed_guard, mesh=DomeMesh(0.),
+                             mesh_tolerance=0.)
+    assert guard.mesh_tolerance == 0.
+
+
 def test_pure_z_raise_is_always_allowed(ff_bed_guard):
     printer, _guard, _tc = install(ff_bed_guard)
     printer.toolhead.pos = [100., 100., 1.0, 0.]

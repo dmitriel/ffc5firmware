@@ -30,6 +30,15 @@
 #     plate's measured shape, and bed_mesh has already added it to the move.
 # The carriage and nozzle limits are both checked; the higher one wins.
 #
+# MESH TOLERANCE. bed_mesh does not follow its mesh exactly: it splits a
+# move only where the correction changes by more than its split_delta_z
+# (0.025 mm by default) and goes straight between the pieces, so the nozzle
+# sags up to that far below the mesh curve on a long first-layer line. The
+# guard compares against the curve itself, so with a mesh active it allows
+# mesh_tolerance (default: bed_mesh's split_delta_z) on top of
+# min_clearance. Without it a 0.12 mm first layer was refused mid-print at
+# 0.085 mm -- bed_mesh doing what it was configured to do.
+#
 # WHAT IS EXEMPT
 #   * homing and probing moves: they stop on a trigger, which is the whole
 #     point of them, and their target is position_min. Every one of them is
@@ -90,6 +99,8 @@ class FFBedGuard:
         # have numbers for).
         self.nozzle_gap = config.getfloat('nozzle_gap', 3.2, minval=0.)
         self.enabled = config.getboolean('enable', True)
+        self.mesh_tolerance = config.getfloat('mesh_tolerance', None,
+                                              minval=0.)
 
         self.kin = None
         self.mesh_cache = (None, 0.)
@@ -109,6 +120,9 @@ class FFBedGuard:
     def _handle_connect(self):
         self.toolchange = self.printer.lookup_object('ff_toolchange', None)
         self.bed_mesh = self.printer.lookup_object('bed_mesh', None)
+        if self.mesh_tolerance is None:
+            splitter = getattr(self.bed_mesh, 'splitter', None)
+            self.mesh_tolerance = getattr(splitter, 'split_delta_z', .025)
         toolhead = self.printer.lookup_object('toolhead')
         kin = toolhead.get_kinematics()
         kin_check = kin.check_move
@@ -278,10 +292,11 @@ class FFBedGuard:
             if worst_clearance is None or clearance < worst_clearance:
                 worst_clearance, worst_t = clearance, t
         where = [start[i] + (end[i] - start[i]) * worst_t for i in range(3)]
-        self._judge(move, worst_clearance, where, mounted, contact)
+        self._judge(move, worst_clearance, where, mounted, contact,
+                    slack=self.mesh_tolerance or 0.)
 
-    def _judge(self, move, clearance, where, mounted, contact):
-        if clearance + EPSILON >= self.min_clearance:
+    def _judge(self, move, clearance, where, mounted, contact, slack=0.):
+        if clearance + slack + EPSILON >= self.min_clearance:
             return
         if mounted is None:
             what = "the carriage (tool unknown -- assuming the lowest)"
@@ -290,9 +305,10 @@ class FFBedGuard:
         else:
             what = "T%d's nozzle" % mounted
         msg = ("Bed guard: move would put %s %.3f mm from the bed at"
-               " X%.2f Y%.2f (minimum %.2f; bed plane at machine Z %.3f)."
+               " X%.2f Y%.2f (minimum %.2f%s; bed plane at machine Z %.3f)."
                " Raise Z first; SET_BED_GUARD ENABLE=0 overrides"
                % (what, clearance, where[0], where[1], self.min_clearance,
+                  " less %.3f mesh tolerance" % slack if slack else "",
                   contact))
         self.blocked += 1
         self.last_block = msg
@@ -339,6 +355,7 @@ class FFBedGuard:
                 'active': self.active(),
                 'suspended_by': list(self.suspend_reasons),
                 'min_clearance': self.min_clearance,
+                'mesh_tolerance': self.mesh_tolerance,
                 'bed_min': list(self.bed_min),
                 'bed_max': list(self.bed_max),
                 'tool': mounted,
