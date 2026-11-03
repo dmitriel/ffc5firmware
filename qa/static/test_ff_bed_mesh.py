@@ -589,3 +589,20 @@ def test_the_sample_retract_goes_straight_up_from_where_it_stopped(
     ff_bed_mesh.TiebreakSession(adapter, session).run_probe(Gcmd())
     (coord, _speed), = printer.toolhead.retracts
     assert coord[:2] == [12.998, 3.996]      # pure Z: nothing for the guard
+
+
+def shipped_section():
+    import configparser
+    cp = configparser.RawConfigParser(strict=False,
+                                      inline_comment_prefixes=("#", ";"))
+    cp.read(ROOT / "pkgs" / "klipper-config" / "payload" / "config" /
+            "ff-print-macros.cfg")
+    return {k: float(v) for k, v in cp.items("ff_bed_mesh")}
+
+
+def test_shipped_settings_travel_one_mm_above_a_low_touch(ff_bed_mesh):
+    # The sweep's first point: a touch at -0.134 on a plate around Z 0.
+    _, helper, printer = install(ff_bed_mesh, **shipped_section())
+    printer.toolhead.z = -0.134
+    helper._raise_tool(False)
+    assert helper.moves[0][0][2] == pytest.approx(0.866)   # not Z 3

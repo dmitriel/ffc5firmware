@@ -49,7 +49,7 @@ both printer models or through every real-world workflow.
   `FF_PROBE_RELEASE_TEST SAVE=1` then `SAVE_CONFIG` once to measure it -- for
   the Creator 5's momentary eddy trigger, the lowest start height whose
   touches repeat those from 3 mm; until then the lift is 2 mm. The first move still goes to Z 5,
-  and a calculated height under Z 1 falls back to Z 3. `FF_BED_MESH_STATUS`
+  and a calculated height under Z -2 falls back to Z 3. `FF_BED_MESH_STATUS`
   shows the settings; they are the `[ff_bed_mesh]` section of
   `ff-print-macros.cfg`. Contributed by
   [@nielssedat](https://github.com/nielssedat) in
