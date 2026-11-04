@@ -83,8 +83,11 @@ both printer models or through every real-world workflow.
   the start, beside the bed, then cleans the other tools while the bed heats,
   and cleans the tool the print starts with **last**, after the mesh: purged,
   wiped hot and left mounted, so the print starts without reheating. The
-  separate grab step is gone. `DEFER_MESH=1` now skips only the Z re-home and
-  the mesh. New `PURGE=<mm>` sets the purge length from the slicer
+  separate grab step is gone; the print Z offset is set just before that last
+  clean. `DEFER_MESH=1` now means no bed mesh for the print: `START_PRINT`
+  skips it and the file's `ADAPTIVE_MESH` does nothing, while the Z re-home
+  after the soak, the offset and the first tool's clean still run. New
+  `PURGE=<mm>` sets the purge length from the slicer
   (`PURGE=0`: wipe only).
 - `START_PRINT` starts heating the bed before the first homing instead of after
   it, so the bed is closer to temperature when the nozzle clean ends.

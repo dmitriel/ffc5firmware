@@ -391,17 +391,23 @@ def test_start_print_without_defer_still_meshes_and_grabs_the_first_tool(model):
 
 
 @pytest.mark.parametrize("model", MODELS)
-def test_a_deferred_start_leaves_the_mesh_and_the_grab_to_the_file(model):
-    out, _ = _run(model,
-                  "START_PRINT BED=60 TOOL=2 NOZZLE=220 CLEAN=0 DEFER_MESH=1",
-                  has_heater=model == "Creator5Pro", extra=_idle_file())
+def test_a_deferred_start_has_no_mesh_but_still_homes_and_grabs(model):
+    out, info = _run(model,
+                     "START_PRINT BED=60 TOOL=2 NOZZLE=220 CLEAN=0 DEFER_MESH=1",
+                     has_heater=model == "Creator5Pro", extra=_idle_file())
     out = _commands(out)
 
     assert "M190 S60.0" in out
-    for left_to_the_file in ("G28.1 Z", "T2", "BED_MESH_PROFILE LOAD=MESH_DATA",
-                             "BED_MESH_CALIBRATE", "G1 Z10 F1200"):
-        assert left_to_the_file not in out
-    assert not any(c.startswith("TOOLCHANGE_SET_PRINT_OFFSET") for c in out)
+    for skipped in ("BED_MESH_PROFILE LOAD=MESH_DATA", "BED_MESH_CALIBRATE",
+                    "THERMAL_MESH_APPLY", "FLOW_MESH_START"):
+        assert not any(c.startswith(skipped) for c in out), skipped
+    # The file's ADAPTIVE_MESH will do nothing, so homing, grab and offset
+    # are all START_PRINT's now.
+    assert out.index("M190 S60.0") < out.index("G28.1 Z") < out.index("T2")
+    assert any(c.startswith("TOOLCHANGE_SET_PRINT_OFFSET") for c in out)
+    assert ("SET_GCODE_VARIABLE MACRO=_FF_JOB VARIABLE=no_mesh VALUE=1"
+            in out)
+    assert any("Bed mesh: none for this print" in m for m in info)
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -438,7 +444,8 @@ def test_the_toggle_chooses_between_a_new_mesh_and_the_saved_one(model):
     def render(enabled):
         return _commands(env.from_string(gcode).render(
             params={}, printer={
-                "gcode_macro ADAPTIVE_MESH_TOGGLE": {"enabled": enabled}},
+                "gcode_macro ADAPTIVE_MESH_TOGGLE": {"enabled": enabled},
+                "gcode_macro _FF_JOB": {"no_mesh": 0}},
             action_respond_info=lambda m: "",
             action_raise_error=_raise).splitlines())
 
@@ -596,22 +603,48 @@ def test_start_print_preheats_all_cleans_the_others_then_the_first_last(model):
     assert _first(out, "M140 S60") < preheat < _first(out, "G28")
     # The others are cleaned while the bed heats; the first tool goes last,
     # after the mesh, and the print offset/flow mesh follow without motion.
-    assert others < _first(out, "M190") < _first(out, "_FF_SAVED_MESH") < final
-    assert final < _first(out, "TOOLCHANGE_SET_PRINT_OFFSET") < \
+    assert others < _first(out, "M190") < _first(out, "_FF_SAVED_MESH")
+    # The print offset (no motion) comes just before the last clean, and the
+    # flow mesh starts after it.
+    assert _first(out, "_FF_SAVED_MESH") < \
+        _first(out, "TOOLCHANGE_SET_PRINT_OFFSET") < final < \
         _first(out, "_FF_FLOW_MESH_BEGIN FIRST_LAYER=0.2")
     assert "PURGE=30.0" in out[others] and "PURGE=30.0" in out[final]
     assert not any(c == "T2" for c in out)          # the clean grabs it
 
 
 @pytest.mark.parametrize("model", MODELS)
-def test_defer_mesh_skips_only_the_mesh_steps(model):
+def test_defer_mesh_skips_every_mesh_step_and_nothing_else(model):
     out, _ = _render_one(model, "START_PRINT", {
         "BED": "60", "TOOL": "2", "NOZZLE": "220", "TOOLS": "0,2",
         "DEFER_MESH": "1"})
-    assert any(c.startswith("_FF_NOZZLE_CLEAN MODE=print TOOLS=2") for c in out)
-    for skipped in ("G28 Z", "_FF_SAVED_MESH", "BED_MESH_CALIBRATE",
-                    "TOOLCHANGE_SET_PRINT_OFFSET", "_FF_FLOW_MESH_BEGIN"):
+    for kept in ("G28 Z", "TOOLCHANGE_SET_PRINT_OFFSET",
+                 "_FF_NOZZLE_CLEAN MODE=print TOOLS=2"):
+        assert any(c.startswith(kept) for c in out), kept
+    for skipped in ("_FF_SAVED_MESH", "BED_MESH_CALIBRATE",
+                    "_FF_FLOW_MESH_BEGIN"):
         assert not any(c.startswith(skipped) for c in out), skipped
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_adaptive_mesh_does_nothing_after_a_deferred_start(model):
+    gcode = _parse(model).get("gcode_macro ADAPTIVE_MESH", "gcode")
+    env = jinja2.Environment("{%", "%}", "{", "}")
+    info = []
+    out = _commands(env.from_string(gcode).render(
+        params={"TOOL": "2"}, printer={
+            "gcode_macro ADAPTIVE_MESH_TOGGLE": {"enabled": 1},
+            "gcode_macro _FF_JOB": {"no_mesh": 1}},
+        action_respond_info=lambda m: info.append(m) or "",
+        action_raise_error=_raise).splitlines())
+    assert out == []
+    assert "skipped" in info[0]
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_end_print_clears_the_no_mesh_flag(model):
+    gcode = _parse(model).get("gcode_macro END_PRINT", "gcode")
+    assert "SET_GCODE_VARIABLE MACRO=_FF_JOB VARIABLE=no_mesh VALUE=0" in gcode
 
 
 def _clean_printer():

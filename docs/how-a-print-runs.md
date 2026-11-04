@@ -119,40 +119,37 @@ START_PRINT TOOLS=0:220,2:240 BED=60 LEVEL=1 SOAK=300
 | `PURGE=<mm>` | purge length for every tool's clean (default 50). `PURGE=0` wipes without purging |
 | `LEVEL=1` | probe a fresh mesh instead of loading the saved one |
 | `SOAK=<seconds>` | dwell after the bed reaches target. The app waited 5 minutes; the default here is 0 |
-| `DEFER_MESH=1` | skip the Z re-home and the mesh; the file's own `ADAPTIVE_MESH` does those (below). The first tool's clean still runs |
+| `DEFER_MESH=1` | no bed mesh for this print: the mesh is skipped, and an `ADAPTIVE_MESH` call in the file does nothing. The Z re-home, the print offset and the first tool's clean still run; the flow mesh does not |
 
 The order: the bed and every tool start heating at once — the tools to 100 °C
 below their print temperature. Then a full home; the other tools are purged,
 wiped and parked at that standby temperature while the bed heats; the bed
-wait and soak; the Z re-home and the mesh; and **last** the tool the print
-starts with is purged and wiped at print temperature and left mounted, so the
-file's first move follows straight on. That last wipe is hot, so it tears off
+wait and soak; the Z re-home and the mesh; the print offset; and **last**
+the tool the print starts with is purged and wiped at print temperature and
+left mounted, so the file's first move follows straight on. That last wipe is hot, so it tears off
 a little less ooze than the cold wipe the others get.
 
 ### Mesh only where the print is
 
 A mesh over the whole bed spends most of its time under nothing. With a
 profile that labels objects, the mesh can cover only the objects and the prime
-tower. Tell the automatic preparation to leave the mesh to the file:
-
-```ini
-[gcode_macro FF_BEFORE_PRINT_START]
-variable_defer_mesh: 1
-```
-
-and call these from Machine start G-code, after Orca's own object
-definitions:
+tower: call these from Machine start G-code, after Orca's own object
+definitions.
 
 ```gcode
 {if has_wipe_tower}
 DEFINE_PRIME_TOWER_OBJECT X=[wipe_tower_x] Y=[wipe_tower_y] WIDTH=[prime_tower_width] BRIM=[prime_tower_brim_width] ROT=[wipe_tower_rotation_angle]
 {endif}
-ADAPTIVE_MESH TOOL=[initial_extruder] NOZZLE=[nozzle_temperature_initial_layer] BED=[bed_temperature_initial_layer_single] LAYER=[layer_height]
+ADAPTIVE_MESH TOOL=[initial_extruder] NOZZLE=[nozzle_temperature_initial_layer] BED=[bed_temperature_initial_layer_single] LAYER=[initial_layer_print_height]
 M109 S[nozzle_temperature_initial_layer] T[initial_extruder]
 ```
 
-`ADAPTIVE_MESH` parks, homes Z, probes the mesh, grabs the first tool, sets
-and the print offset.
+`ADAPTIVE_MESH` parks, homes Z, probes the mesh, grabs the first tool again
+and sets the print offset. It runs after the preparation, which has already
+loaded a saved mesh and cleaned the first tool, so that tool is docked for
+the probe and grabbed again unwiped. Leave `defer_mesh` at 0 for this:
+with `DEFER_MESH=1` the print has no mesh at all and `ADAPTIVE_MESH` does
+nothing.
 `DEFINE_PRIME_TOWER_OBJECT` uses the tower the file actually prints rather
 than the numbers Orca expands into the start G-code, which in a multi-plate
 project can belong to another plate. `ADAPTIVE_MESH_TOGGLE` (a tile in
