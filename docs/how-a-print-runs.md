@@ -108,7 +108,7 @@ print with an empty carriage.
 With `prepare: 0`, call it yourself from Machine start G-code:
 
 ```gcode
-START_PRINT TOOLS=0:220,2:240 BED=60 LEVEL=1 SOAK=300
+START_PRINT TOOLS=0:220,2:240 BED=60 MESH=adaptive SOAK=300
 ```
 
 | Parameter | Does |
@@ -117,9 +117,8 @@ START_PRINT TOOLS=0:220,2:240 BED=60 LEVEL=1 SOAK=300
 | `BED=`, `NOZZLE=`, `LAYER=` | the print's bed, nozzle and first-layer height |
 | `CLEAN=0` | skip the pre-print purge and wipe; the first tool is just grabbed |
 | `PURGE=<mm>` | purge length for every tool's clean (default 50). `PURGE=0` wipes without purging |
-| `LEVEL=1` | probe a fresh mesh instead of loading the saved one |
+| `MESH=` | `off`, `default`, `adaptive` or `thermal` for this print, instead of `BED_MESH_MODE`'s choice (below). `LEVEL=1` still works and means `adaptive` |
 | `SOAK=<seconds>` | dwell after the bed reaches target. The app waited 5 minutes; the default here is 0 |
-| `DEFER_MESH=1` | no bed mesh for this print: the mesh is skipped, and an `ADAPTIVE_MESH` call in the file does nothing. The Z re-home, the print offset and the first tool's clean still run; the flow mesh does not |
 
 The order: the bed and every tool start heating at once — the tools to 100 °C
 below their print temperature. Then a full home; the other tools are purged,
@@ -130,32 +129,40 @@ left mounted, so the file's first move follows straight on. That last wipe is ho
 rests a second on the pad (`clean_hot_dwell` in `ff-filament.cfg`) and lifts
 -- so it tears off a little less ooze than the cold wipe the others get.
 
-### Mesh only where the print is
-
-A mesh over the whole bed spends most of its time under nothing. With a
-profile that labels objects, the mesh can cover only the objects and the prime
-tower: call these from Machine start G-code, after Orca's own object
-definitions.
+### Which mesh: `BED_MESH_MODE`
 
 ```gcode
-{if has_wipe_tower}
-DEFINE_PRIME_TOWER_OBJECT X=[wipe_tower_x] Y=[wipe_tower_y] WIDTH=[prime_tower_width] BRIM=[prime_tower_brim_width] ROT=[wipe_tower_rotation_angle]
-{endif}
-ADAPTIVE_MESH TOOL=[initial_extruder] NOZZLE=[nozzle_temperature_initial_layer] BED=[bed_temperature_initial_layer_single] LAYER=[initial_layer_print_height]
-M109 S[nozzle_temperature_initial_layer] T[initial_extruder]
+BED_MESH_MODE MODE=adaptive     ; off | default | adaptive | thermal
+BED_MESH_MODE                   ; show the current choice
 ```
 
-`ADAPTIVE_MESH` parks, homes Z, probes the mesh, grabs the first tool again
-and sets the print offset. It runs after the preparation, which has already
-loaded a saved mesh and cleaned the first tool, so that tool is docked for
-the probe and grabbed again unwiped. Leave `defer_mesh` at 0 for this:
-with `DEFER_MESH=1` the print has no mesh at all and `ADAPTIVE_MESH` does
-nothing.
-`DEFINE_PRIME_TOWER_OBJECT` uses the tower the file actually prints rather
-than the numbers Orca expands into the start G-code, which in a multi-plate
-project can belong to another plate. `ADAPTIVE_MESH_TOGGLE` (a tile in
-Mainsail) switches probing off, and the saved `MESH_DATA` is loaded instead.
-It is enabled again after a restart.
+| Mode | The mesh step of `START_PRINT` |
+|---|---|
+| `off` | no mesh: the print runs on the homed plane, and the flow mesh is not started |
+| `default` | loads the saved `MESH_DATA` — the factory mesh, or yours saved over it. The default |
+| `adaptive` | probes only where the print is: the file's objects and its prime tower, plus 16 mm (`variable_adaptive_margin`). A file without labelled objects is probed over the whole bed |
+| `thermal` | probes the [thermal map](thermal-mesh.md)'s four points and loads the matching mesh; `MESH_DATA` without a map |
+
+The mesh step runs after the soak and the Z re-home, with every tool docked,
+and before the first tool's clean, so the print still starts straight after
+the wipe. For `adaptive`, `[ff_print]` reads the file's
+`EXCLUDE_OBJECT_DEFINE` lines (Orca writes them at the top when *Label
+objects* is on) and defines them before probing, and defines the prime tower
+from the file's own moves rather than the numbers Orca expands into start
+G-code, which in a multi-plate project can belong to another plate. Nothing
+is needed in the slicer's start G-code.
+
+`START_PRINT MESH=<mode>` overrides it for one print. The choice is not kept
+across a restart; to make one the default, add this at the end of
+`printer.cfg`:
+
+```
+[gcode_macro BED_MESH_MODE]
+variable_mode: 'adaptive'
+```
+
+A profile that still calls `ADAPTIVE_MESH` keeps working: it now only says
+the mesh was already taken. Remove the call when convenient.
 
 ---
 

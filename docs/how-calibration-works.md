@@ -203,8 +203,10 @@ surprises:
 | `MESH_DATA` | the factory mesh, probed before the printer shipped. This is what a print loads unless told otherwise |
 | `default` | the working profile `BED_MESH_CALIBRATE` writes into |
 
-`START_PRINT` loads `MESH_DATA` on every print. Given `LEVEL=1` it instead
-probes a fresh mesh and loads `default`. Mesh probing travels at 500 mm/s
+`START_PRINT` loads `MESH_DATA` on every print. `BED_MESH_MODE` (or
+`START_PRINT MESH=`) changes that: `adaptive` probes a fresh mesh over the
+print area and leaves it in `default`, `thermal` matches the thermal map, and
+`off` prints with none. Mesh probing travels at 500 mm/s
 and 20000 mm/s², the fastest the carriage moves anywhere else, for the probing
 run only — `[ff_bed_mesh]`'s `travel_speed` and `travel_accel`. (The stock
 application dropped acceleration to 2000 for it.) Each point is touched

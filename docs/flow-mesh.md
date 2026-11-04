@@ -18,9 +18,10 @@ FLOW_MESH_TOGGLE ENABLE=0      ; back to standard
 FLOW_MESH_STATUS               ; during a print: layer, mesh left, flat since layer N
 ```
 
-`START_PRINT` and `ADAPTIVE_MESH` start it once the mesh is loaded and the
-first tool is mounted, and say `flow mesh: on`; otherwise they say
-`Bed mesh strategy: standard`. `END_PRINT` and a cancel stop it.
+`START_PRINT` starts it after the first tool's clean, whichever mesh
+`BED_MESH_MODE` chose, and says `flow mesh: on`; otherwise it says
+`Bed mesh strategy: standard`. With `BED_MESH_MODE` `off` there is no mesh
+to absorb and it stays off. `END_PRINT` and a cancel stop it.
 
 The toggle resets to off on every restart, including the
 `FIRMWARE_RESTART` after a shutdown. To make the flow mesh the default, add
@@ -76,7 +77,7 @@ never forced to the limit on a flat spot; it keeps its own height there.
   more. If your first layer is already close to the minimum, raise the
   slicer's first-layer height rather than lowering `min_thickness`.
 * **The first layer's height comes from the print start**, the `LAYER=`
-  that `START_PRINT` and `ADAPTIVE_MESH` already take (filled in from the
+  that `START_PRINT` already takes (filled in from the
   file's first `;HEIGHT:` when the printer starts the print itself). If it is
   missing, the print says so and uses the standard mesh. In a slicer's start
   G-code pass the *first* layer's height, e.g. Orca's

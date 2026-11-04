@@ -391,96 +391,6 @@ def test_start_print_without_defer_still_meshes_and_grabs_the_first_tool(model):
 
 
 @pytest.mark.parametrize("model", MODELS)
-def test_a_deferred_start_has_no_mesh_but_still_homes_and_grabs(model):
-    out, info = _run(model,
-                     "START_PRINT BED=60 TOOL=2 NOZZLE=220 CLEAN=0 DEFER_MESH=1",
-                     has_heater=model == "Creator5Pro", extra=_idle_file())
-    out = _commands(out)
-
-    assert "M190 S60.0" in out
-    for skipped in ("BED_MESH_PROFILE LOAD=MESH_DATA", "BED_MESH_CALIBRATE",
-                    "THERMAL_MESH_APPLY", "FLOW_MESH_START"):
-        assert not any(c.startswith(skipped) for c in out), skipped
-    # The file's ADAPTIVE_MESH will do nothing, so homing, grab and offset
-    # are all START_PRINT's now.
-    assert out.index("M190 S60.0") < out.index("G28.1 Z") < out.index("T2")
-    assert any(c.startswith("TOOLCHANGE_SET_PRINT_OFFSET") for c in out)
-    assert ("SET_GCODE_VARIABLE MACRO=_FF_JOB VARIABLE=no_mesh VALUE=1"
-            in out)
-    assert any("Bed mesh: none for this print" in m for m in info)
-
-
-@pytest.mark.parametrize("model", MODELS)
-def test_defer_mesh_is_passed_on_only_when_the_variable_asks_for_it(model):
-    cp = _parse(model)
-    macro = cp.get("gcode_macro FF_BEFORE_PRINT_START", "gcode")
-
-    assert cp.get("gcode_macro FF_BEFORE_PRINT_START",
-                  "variable_defer_mesh").strip() == "0"
-    assert "{% if me.defer_mesh %} DEFER_MESH=1{% endif %}" in macro
-
-
-@pytest.mark.parametrize("model", MODELS)
-def test_the_adaptive_mesh_probes_then_grabs_the_first_tool(model):
-    out, _ = _run(model,
-                  "ADAPTIVE_MESH TOOL=1 NOZZLE=230 BED=60 LAYER=0.2",
-                  has_heater=model == "Creator5Pro", extra=_idle_file())
-    out = _commands(out)
-    probe = "BED_MESH_CALIBRATE ADAPTIVE=1 ADAPTIVE_MARGIN=16.0"
-
-    assert out[:4] == ["TOOLCHANGE_SET_PRINT_OFFSET CLEAR=1", "TOOLCHANGE_PARK",
-                       "G28.1 Z", "BED_MESH_CLEAR"]
-    assert out.index(probe) < out.index("T1")
-    assert out[-3:] == [
-        "M104 S230.0 T1", "T1",
-        "TOOLCHANGE_SET_PRINT_OFFSET NOZZLE=230.0 BED=60.0 LAYER=0.2 TOOL=1"]
-
-
-@pytest.mark.parametrize("model", MODELS)
-def test_the_toggle_chooses_between_a_new_mesh_and_the_saved_one(model):
-    gcode = _parse(model).get("gcode_macro ADAPTIVE_MESH", "gcode")
-    env = jinja2.Environment("{%", "%}", "{", "}")
-
-    def render(enabled):
-        return _commands(env.from_string(gcode).render(
-            params={}, printer={
-                "gcode_macro ADAPTIVE_MESH_TOGGLE": {"enabled": enabled},
-                "gcode_macro _FF_JOB": {"no_mesh": 0}},
-            action_respond_info=lambda m: "",
-            action_raise_error=_raise).splitlines())
-
-    saved, probed = render(0), render(1)
-    assert "_FF_SAVED_MESH" in saved
-    assert not any(c.startswith("BED_MESH_CALIBRATE") for c in saved)
-    assert any(c.startswith("BED_MESH_CALIBRATE ADAPTIVE=1") for c in probed)
-    assert "_FF_SAVED_MESH" not in probed
-
-
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("thermal", [0, 1])
-def test_the_saved_mesh_is_mesh_data_or_the_thermal_map(model, thermal):
-    extra = {"gcode_macro THERMAL_MESH_TOGGLE": {
-        "enabled": thermal, "method": "bilinear", "match": "absolute",
-        "correct": "none"}}
-    out, info = _run(model, "_FF_SAVED_MESH", has_heater=False, extra=extra)
-    if thermal:
-        assert out == ["THERMAL_MESH_APPLY PREPARE=0 METHOD=bilinear "
-                       "MATCH=absolute CORRECT=none FALLBACK=MESH_DATA"]
-        assert "THERMAL" in info[0]
-    else:
-        assert out == ["BED_MESH_PROFILE LOAD=MESH_DATA"]
-
-
-@pytest.mark.parametrize("model", MODELS)
-def test_the_thermal_toggle_flips_and_validates(model):
-    on, info = _run(model, "THERMAL_MESH_TOGGLE", has_heater=False)
-    assert on == ["SET_GCODE_VARIABLE MACRO=THERMAL_MESH_TOGGLE "
-                  "VARIABLE=enabled VALUE=1"]
-    with pytest.raises(AssertionError, match="ENABLE must be 0 or 1"):
-        _run(model, "THERMAL_MESH_TOGGLE ENABLE=2", has_heater=False)
-
-
-@pytest.mark.parametrize("model", MODELS)
 def test_a_print_says_which_mesh_strategy_it_uses(model):
     _out, info = _run(model, "_FF_FLOW_MESH_BEGIN FIRST_LAYER=0.2",
                       has_heater=False)
@@ -503,23 +413,8 @@ def test_the_flow_mesh_takes_the_first_layer_from_the_print_start(
 @pytest.mark.parametrize("model", MODELS)
 def test_print_start_hands_its_layer_to_the_flow_mesh(model):
     cp = _parse(model)
-    for macro in ("START_PRINT", "ADAPTIVE_MESH"):
-        assert "_FF_FLOW_MESH_BEGIN FIRST_LAYER={layer}" in cp.get(
-            "gcode_macro " + macro, "gcode")
-
-
-@pytest.mark.parametrize("model", MODELS)
-def test_the_toggle_flips_and_validates(model):
-    flipped, _ = _run(model, "ADAPTIVE_MESH_TOGGLE", has_heater=False)
-    off, info = _run(model, "ADAPTIVE_MESH_TOGGLE ENABLE=0", has_heater=False)
-    disable = ("SET_GCODE_VARIABLE MACRO=ADAPTIVE_MESH_TOGGLE "
-               "VARIABLE=enabled VALUE=0")
-
-    assert _commands(flipped) == [disable]
-    assert _commands(off) == [disable]
-    assert any("DISABLED" in m for m in info)
-    with pytest.raises(AssertionError, match="ENABLE must be 0 or 1"):
-        _run(model, "ADAPTIVE_MESH_TOGGLE ENABLE=2", has_heater=False)
+    assert "_FF_FLOW_MESH_BEGIN FIRST_LAYER={layer}" in cp.get(
+        "gcode_macro START_PRINT", "gcode")
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -603,48 +498,14 @@ def test_start_print_preheats_all_cleans_the_others_then_the_first_last(model):
     assert _first(out, "M140 S60") < preheat < _first(out, "G28")
     # The others are cleaned while the bed heats; the first tool goes last,
     # after the mesh, and the print offset/flow mesh follow without motion.
-    assert others < _first(out, "M190") < _first(out, "_FF_SAVED_MESH")
+    assert others < _first(out, "M190") < _first(out, "_FF_MESH MODE=default")
     # The print offset (no motion) comes just before the last clean, and the
     # flow mesh starts after it.
-    assert _first(out, "_FF_SAVED_MESH") < \
+    assert _first(out, "_FF_MESH") < \
         _first(out, "TOOLCHANGE_SET_PRINT_OFFSET") < final < \
         _first(out, "_FF_FLOW_MESH_BEGIN FIRST_LAYER=0.2")
     assert "PURGE=30.0" in out[others] and "PURGE=30.0" in out[final]
     assert not any(c == "T2" for c in out)          # the clean grabs it
-
-
-@pytest.mark.parametrize("model", MODELS)
-def test_defer_mesh_skips_every_mesh_step_and_nothing_else(model):
-    out, _ = _render_one(model, "START_PRINT", {
-        "BED": "60", "TOOL": "2", "NOZZLE": "220", "TOOLS": "0,2",
-        "DEFER_MESH": "1"})
-    for kept in ("G28 Z", "TOOLCHANGE_SET_PRINT_OFFSET",
-                 "_FF_NOZZLE_CLEAN MODE=print TOOLS=2"):
-        assert any(c.startswith(kept) for c in out), kept
-    for skipped in ("_FF_SAVED_MESH", "BED_MESH_CALIBRATE",
-                    "_FF_FLOW_MESH_BEGIN"):
-        assert not any(c.startswith(skipped) for c in out), skipped
-
-
-@pytest.mark.parametrize("model", MODELS)
-def test_adaptive_mesh_does_nothing_after_a_deferred_start(model):
-    gcode = _parse(model).get("gcode_macro ADAPTIVE_MESH", "gcode")
-    env = jinja2.Environment("{%", "%}", "{", "}")
-    info = []
-    out = _commands(env.from_string(gcode).render(
-        params={"TOOL": "2"}, printer={
-            "gcode_macro ADAPTIVE_MESH_TOGGLE": {"enabled": 1},
-            "gcode_macro _FF_JOB": {"no_mesh": 1}},
-        action_respond_info=lambda m: info.append(m) or "",
-        action_raise_error=_raise).splitlines())
-    assert out == []
-    assert "skipped" in info[0]
-
-
-@pytest.mark.parametrize("model", MODELS)
-def test_end_print_clears_the_no_mesh_flag(model):
-    gcode = _parse(model).get("gcode_macro END_PRINT", "gcode")
-    assert "SET_GCODE_VARIABLE MACRO=_FF_JOB VARIABLE=no_mesh VALUE=0" in gcode
 
 
 def _clean_printer():
@@ -704,3 +565,89 @@ def test_the_cold_wipe_waits_for_the_cooldown_instead(model):
                          {"TOOL": "1", "TEMP": "220"}, extra=_wipe_printer())
     assert not any(c.startswith("G4") for c in out)
     assert any(c.startswith("TEMPERATURE_WAIT") for c in out)
+
+
+# -- one bed mesh selector -------------------------------------------------
+
+@pytest.mark.parametrize("model", MODELS)
+def test_bed_mesh_mode_sets_one_of_four_and_refuses_the_rest(model):
+    out, info = _run(model, "BED_MESH_MODE MODE=Adaptive", has_heater=False)
+    assert out == ["SET_GCODE_VARIABLE MACRO=BED_MESH_MODE VARIABLE=mode "
+                   "VALUE=\"'adaptive'\""]
+    _out, info = _run(model, "BED_MESH_MODE", has_heater=False)
+    assert "Bed mesh mode: default" in info[0]
+    with pytest.raises(AssertionError, match="must be one of"):
+        _run(model, "BED_MESH_MODE MODE=level", has_heater=False)
+
+
+def _mesh_printer(objects=(), tower=True):
+    return {"exclude_object": {"objects": [{"name": n} for n in objects]},
+            "ff_print": {"prime_tower_x": 100.0 if tower else None}}
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("mode, expected", [
+    ("off", ["BED_MESH_CLEAR"]),
+    ("default", ["BED_MESH_CLEAR", "BED_MESH_PROFILE LOAD=MESH_DATA"]),
+    ("adaptive", ["BED_MESH_CLEAR", "FF_PRINT_DEFINE_OBJECTS",
+                  "DEFINE_PRIME_TOWER_OBJECT", "M106 P1 S0",
+                  "BED_MESH_CALIBRATE ADAPTIVE=1 ADAPTIVE_MARGIN=16",
+                  "SET_VELOCITY_LIMIT ACCEL=20000"]),
+    ("thermal", ["BED_MESH_CLEAR",
+                 "THERMAL_MESH_APPLY PREPARE=0 METHOD=bilinear MATCH=absolute"
+                 " CORRECT=none FALLBACK=MESH_DATA"]),
+])
+def test_the_mesh_step_for_each_mode(model, mode, expected):
+    out, _ = _render_one(model, "_FF_MESH", {"MODE": mode},
+                         extra=_mesh_printer())
+    assert out == expected
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_a_prime_tower_the_file_already_defined_is_not_defined_twice(model):
+    out, _ = _render_one(model, "_FF_MESH", {"MODE": "adaptive"},
+                         extra=_mesh_printer(objects=["PRIME_TOWER", "CUBE"]))
+    assert "DEFINE_PRIME_TOWER_OBJECT" not in out
+    out, _ = _render_one(model, "_FF_MESH", {"MODE": "adaptive"},
+                         extra=_mesh_printer(tower=False))
+    assert "DEFINE_PRIME_TOWER_OBJECT" not in out
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("params, mode", [
+    ({}, "default"),                       # BED_MESH_MODE's own
+    ({"MESH": "Thermal"}, "thermal"),      # this print only
+    ({"LEVEL": "1"}, "adaptive"),          # the old full probe
+    ({"MESH": "off"}, "off"),
+])
+def test_start_print_meshes_by_the_selector_or_its_own_mesh_param(
+        model, params, mode):
+    base = {"BED": "60", "TOOL": "0", "NOZZLE": "220", "LAYER": "0.2"}
+    out, info = _render_one(model, "START_PRINT", dict(base, **params))
+    assert out.count("_FF_MESH MODE=%s" % mode) == 1
+    # Mesh before the last clean, while every tool is docked.
+    assert _first(out, "_FF_MESH") < _first(out, "_FF_NOZZLE_CLEAN MODE=print")
+    flow = any(c.startswith("_FF_FLOW_MESH_BEGIN") for c in out)
+    assert flow == (mode != "off")
+    if mode == "off":
+        assert any("no flow mesh" in m for m in info)
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_adaptive_mesh_is_retired_to_a_harmless_message(model):
+    out, info = _render_one(model, "ADAPTIVE_MESH", {"TOOL": "0"})
+    assert out == []
+    assert "START_PRINT took the mesh" in info[0]
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_no_mesh_toggles_or_defer_are_left(model):
+    cp = _parse(model)
+    for gone in ("gcode_macro ADAPTIVE_MESH_TOGGLE",
+                 "gcode_macro ADAPTIVE_MESH_STATUS",
+                 "gcode_macro THERMAL_MESH_TOGGLE", "gcode_macro _FF_SAVED_MESH"):
+        assert not cp.has_section(gone)
+    assert not cp.has_option("gcode_macro FF_BEFORE_PRINT_START",
+                             "variable_defer_mesh")
+    assert "DEFER_MESH" not in cp.get("gcode_macro START_PRINT", "gcode")
+    assert cp.has_section("gcode_macro FLOW_MESH_TOGGLE")

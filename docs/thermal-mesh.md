@@ -8,8 +8,8 @@ bed 100 °C in a 50 °C chamber.
 
 `[ff_thermal_mesh]` builds a map of meshes over both temperatures once, then
 picks the right mesh for each print from a four-point probe instead of a full
-grid. It is not used by anything unless you call it; `START_PRINT` and
-`ADAPTIVE_MESH` behave exactly as before.
+grid. It is not used by anything unless you call it, or choose it with
+`BED_MESH_MODE MODE=thermal`.
 
 It is new and has not been validated on hardware yet. Look at what it
 reports before you print on it.
@@ -96,23 +96,22 @@ mostly noise — and the four points are saved in the map file.
 ### In prints
 
 ```gcode
-THERMAL_MESH_TOGGLE ENABLE=1
+BED_MESH_MODE MODE=thermal
 ```
 
-From then on, a print that would load the saved `MESH_DATA` — `START_PRINT`
-without `LEVEL=1`, or `ADAPTIVE_MESH` with adaptive probing off — probes the
-map's four points instead, after its soak and Z homing, and loads the
-effective mesh. The console says `Bed mesh mode: THERMAL`. Without a map or
-chosen points it says so and loads `MESH_DATA`, so a print never fails for
-lack of one.
+From then on `START_PRINT`'s mesh step probes the map's four points, after
+the print's soak and Z homing, and loads the effective mesh. The console says
+`Bed mesh mode: THERMAL`. Without a map or chosen points it says so and loads
+`MESH_DATA`, so a print never fails for lack of one. `START_PRINT
+MESH=thermal` does the same for one print.
 
-The toggle is not kept across a restart. To make it the default, add this at
-the end of `printer.cfg`; `variable_method`, `variable_match` and
-`variable_correct` set the options below the same way:
+The choice is not kept across a restart. To make it the default, add this at
+the end of `printer.cfg`; `variable_thermal_method`, `variable_thermal_match`
+and `variable_thermal_correct` set the options below the same way:
 
 ```
-[gcode_macro THERMAL_MESH_TOGGLE]
-variable_enabled: 1
+[gcode_macro BED_MESH_MODE]
+variable_mode: 'thermal'
 ```
 
 ### By hand

@@ -16,9 +16,15 @@ both printer models or through every real-world workflow.
   layer, until the effective mesh is flat. `FLOW_MESH_TOGGLE ENABLE=1` uses it
   for the next print. Off by default and not yet tested on hardware. See
   [the flow mesh page](docs/flow-mesh.md).
-- `THERMAL_MESH_TOGGLE ENABLE=1` makes prints that would load `MESH_DATA`
-  match the thermal map instead, falling back to `MESH_DATA` without one.
-  Every print now says which bed-mesh strategy it uses.
+- One bed-mesh selector, `BED_MESH_MODE MODE=off|default|adaptive|thermal`,
+  for the mesh `START_PRINT` uses: none, the saved `MESH_DATA`, a fresh mesh
+  over just the file's objects and prime tower, or the thermal map's match
+  (`MESH_DATA` without a map). `START_PRINT MESH=` overrides it for one print;
+  `LEVEL=1` means `adaptive`. The adaptive mesh is now part of `START_PRINT`
+  -- `[ff_print]` defines the file's objects ahead of it -- so the slicer
+  needs no `ADAPTIVE_MESH` call, and it runs before the first tool's clean.
+  Every print says which mesh and strategy it uses. The flow mesh keeps its
+  own `FLOW_MESH_TOGGLE`.
 - Thermal mesh map: `THERMAL_MESH_SWEEP` probes full meshes at every bed and
   chamber temperature pair in a range (serpentine order, heat-soaked, repeated
   until two agree within a threshold) and stores them in `thermal_mesh.json`;
@@ -59,13 +65,10 @@ both printer models or through every real-world workflow.
   `ff-print-macros.cfg`. Contributed by
   [@nielssedat](https://github.com/nielssedat) in
   [#29](https://github.com/Klipper4FlashForge/firmware/pull/29).
-- `ADAPTIVE_MESH` and `DEFINE_PRIME_TOWER_OBJECT` for a slicer profile whose
-  start G-code calls them: the mesh is probed only over the objects and the
-  prime tower, the first tool is grabbed and the print offset set after it.
-  Set `variable_defer_mesh: 1` on `FF_BEFORE_PRINT_START` to have `START_PRINT`
-  leave those steps to the file. `ADAPTIVE_MESH_TOGGLE` (a Mainsail tile) turns
-  adaptive probing off to load the saved `MESH_DATA` instead. Not on by
-  default; nothing changes for a profile that does not call them.
+- `DEFINE_PRIME_TOWER_OBJECT` registers the prime tower the file actually
+  prints as an object, so an adaptive mesh covers it. (`ADAPTIVE_MESH`, which
+  a slicer profile called for this, now only reports that `START_PRINT` took
+  the mesh.)
 - `printer.ff_print` reports the active plate's prime tower: position, size,
   brim, rotation and measured outline.
 - Gentler return to the print after a tool change, for a printer that restores
@@ -85,10 +88,7 @@ both printer models or through every real-world workflow.
   wiped hot -- resting 1 s on the pad (`clean_hot_dwell`) -- and left
   mounted, so the print starts without reheating. The
   separate grab step is gone; the print Z offset is set just before that last
-  clean. `DEFER_MESH=1` now means no bed mesh for the print: `START_PRINT`
-  skips it and the file's `ADAPTIVE_MESH` does nothing, while the Z re-home
-  after the soak, the offset and the first tool's clean still run. New
-  `PURGE=<mm>` sets the purge length from the slicer
+  clean. New `PURGE=<mm>` sets the purge length from the slicer
   (`PURGE=0`: wipe only).
 - `START_PRINT` starts heating the bed before the first homing instead of after
   it, so the bed is closer to temperature when the nozzle clean ends.
