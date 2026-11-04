@@ -525,15 +525,45 @@ def test_preheat_only_sets_each_tool_100_below_its_temperature(model):
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("mode, cool, release", [("standby", 1, 1),
-                                                 ("print", 0, 0)])
-def test_the_print_tool_wipes_hot_and_stays_mounted(model, mode, cool,
-                                                    release):
+def test_a_standby_tool_wipes_cold_and_is_released(model):
     out, _ = _render_one(model, "_FF_NOZZLE_CLEAN", {
-        "MODE": mode, "TOOLS": "1", "TEMP": "220"}, extra=_clean_printer())
-    assert "_FF_NOZZLE_WIPE TOOL=1 TEMP=220 COOL=%d" % cool in out
-    assert "_FF_FILAMENT_FINISH RELEASE=%d HEAT_OFF=0" % release in out
+        "TOOLS": "1", "TEMP": "240"}, extra=_clean_printer())
+    # Standby tools keep the material table's temperature (PLA: 220).
+    assert "_FF_NOZZLE_WIPE TOOL=1 TEMP=220 COOL=1" in out
+    assert "_FF_FILAMENT_FINISH RELEASE=1 HEAT_OFF=0" in out
     assert "G1 E50.0 F240" in out
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("params, temp", [
+    ({"TEMP": "240"}, "240.0"),                       # NOZZLE, not PLA's 220
+    ({"TEMP": "240", "TEMPS": "0,235,0,0"}, "235.0"),  # TOOLS= wins
+])
+def test_the_print_tool_is_cleaned_at_the_print_temperature(model, params,
+                                                            temp):
+    out, info = _render_one(model, "_FF_NOZZLE_CLEAN", dict(
+        {"MODE": "print", "TOOLS": "1"}, **params), extra=_clean_printer())
+    assert "_FF_FILAMENT_PREP TOOL=1 TEMP=%s ALLOW_PRINTING=1" % temp in out
+    assert ("_FF_NOZZLE_WIPE TOOL=1 TEMP=%s COOL=0 UNRETRACT=5.0 SPEED=240"
+            % temp) in out
+    assert "_FF_FILAMENT_FINISH RELEASE=0 HEAT_OFF=0" in out
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_the_print_tool_preheats_100_below_its_print_temperature(model):
+    out, _ = _render_one(model, "_FF_NOZZLE_CLEAN", {
+        "MODE": "preheat", "TOOLS": "0,1", "TEMP": "240", "PRINT_TOOL": "1"},
+        extra=_clean_printer())
+    assert out == ["M104 S120.0 T0", "M104 S140.0 T1"]  # PLA 220, NOZZLE 240
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_no_purge_means_nothing_to_unretract(model):
+    out, _ = _render_one(model, "_FF_NOZZLE_CLEAN", {
+        "MODE": "print", "TOOLS": "1", "TEMP": "220", "PURGE": "0"},
+        extra=_clean_printer())
+    assert any(c.startswith("_FF_NOZZLE_WIPE") and "UNRETRACT=0 " in c
+               for c in out)
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -723,3 +753,17 @@ def test_fixed_is_a_mode_and_default_is_not(model):
                    "VALUE=\"'fixed'\""]
     with pytest.raises(AssertionError, match="must be one of"):
         _run(model, "BED_MESH_MODE MODE=default", has_heater=False)
+
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_the_hot_wipe_unretracts_on_the_pad_then_rests_then_lifts(model):
+    out, _ = _render_one(model, "_FF_NOZZLE_WIPE", {
+        "TOOL": "1", "TEMP": "220", "COOL": "0", "UNRETRACT": "5",
+        "SPEED": "240"}, extra=_wipe_printer())
+    pad = next(i for i, c in enumerate(out) if c.startswith("G1 Z0.") or
+               (c.startswith("G1 Z") and "F600" in c))
+    unretract = out.index("G1 E5.0 F240.0")
+    assert pad < unretract < out.index("G4 P1000") < out.index("G1 Z10 F1200")
+    assert out[unretract - 2:unretract] == ["M83", "G92 E0"]
+    assert not any(c.startswith("TEMPERATURE_WAIT") for c in out)

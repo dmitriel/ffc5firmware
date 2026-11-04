@@ -92,8 +92,9 @@ both printer models or through every real-world workflow.
 - `START_PRINT` heats every tool to 100 °C below its print temperature at
   the start, beside the bed, then cleans the other tools while the bed heats,
   and cleans the tool the print starts with **last**, after the mesh: purged,
-  wiped hot -- resting 1 s on the pad (`clean_hot_dwell`) -- and left
-  mounted, so the print starts without reheating. The
+  wiped hot -- the purge's retract pushed back out on the pad, then a 1 s
+  rest (`clean_hot_dwell`) -- and left mounted at the print's own
+  temperature, primed, so the print starts without reheating. The
   separate grab step is gone; the print Z offset is set just before that last
   clean. New `PURGE=<mm>` sets the purge length from the slicer
   (`PURGE=0`: wipe only).
