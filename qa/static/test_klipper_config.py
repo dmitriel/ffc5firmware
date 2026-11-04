@@ -369,7 +369,7 @@ def _idle_file():
 
 @pytest.mark.parametrize("model", MODELS)
 def test_the_bed_starts_heating_before_the_first_homing(model):
-    out, _ = _run(model, "START_PRINT BED=60 TOOL=0 NOZZLE=220 CLEAN=0 MESH=default",
+    out, _ = _run(model, "START_PRINT BED=60 TOOL=0 NOZZLE=220 CLEAN=0 MESH=fixed",
                   has_heater=model == "Creator5Pro", extra=_idle_file())
     out = _commands(out)
 
@@ -379,7 +379,7 @@ def test_the_bed_starts_heating_before_the_first_homing(model):
 
 @pytest.mark.parametrize("model", MODELS)
 def test_start_print_without_defer_still_meshes_and_grabs_the_first_tool(model):
-    out, _ = _run(model, "START_PRINT BED=60 TOOL=2 NOZZLE=220 CLEAN=0 MESH=default",
+    out, _ = _run(model, "START_PRINT BED=60 TOOL=2 NOZZLE=220 CLEAN=0 MESH=fixed",
                   has_heater=model == "Creator5Pro", extra=_idle_file())
     out = _commands(out)
 
@@ -588,7 +588,7 @@ def _mesh_printer(objects=(), tower=True):
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("mode, expected", [
     ("off", ["BED_MESH_CLEAR"]),
-    ("default", ["BED_MESH_CLEAR", "BED_MESH_PROFILE LOAD=MESH_DATA"]),
+    ("fixed", ["BED_MESH_CLEAR", "BED_MESH_PROFILE LOAD=MESH_DATA"]),
     ("adaptive", ["BED_MESH_CLEAR", "_FF_MESH_ADAPTIVE"]),
     ("auto", ["BED_MESH_CLEAR",
               "THERMAL_MESH_APPLY PREPARE=0 METHOD=bilinear MATCH=absolute"
@@ -643,7 +643,7 @@ def test_auto_falls_back_to_adaptive_only_when_thermal_is_not_accepted(
 @pytest.mark.parametrize("params, mode", [
     ({}, "auto"),                          # BED_MESH_MODE's own
     ({"MESH": "Thermal"}, "thermal"),      # this print only
-    ({"LEVEL": "1"}, "adaptive"),          # the old full probe
+    ({"MESH": "adaptive", "LEVEL": "1"}, "adaptive"),  # LEVEL is ignored
     ({"MESH": "off"}, "off"),
 ])
 def test_start_print_meshes_by_the_selector_or_its_own_mesh_param(
@@ -676,4 +676,15 @@ def test_no_mesh_toggles_or_defer_are_left(model):
     assert not cp.has_option("gcode_macro FF_BEFORE_PRINT_START",
                              "variable_defer_mesh")
     assert "DEFER_MESH" not in cp.get("gcode_macro START_PRINT", "gcode")
+    assert "LEVEL" not in cp.get("gcode_macro START_PRINT", "gcode")
     assert cp.has_section("gcode_macro FLOW_MESH_TOGGLE")
+
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_fixed_is_a_mode_and_default_is_not(model):
+    out, _ = _run(model, "BED_MESH_MODE MODE=fixed", has_heater=False)
+    assert out == ["SET_GCODE_VARIABLE MACRO=BED_MESH_MODE VARIABLE=mode "
+                   "VALUE=\"'fixed'\""]
+    with pytest.raises(AssertionError, match="must be one of"):
+        _run(model, "BED_MESH_MODE MODE=default", has_heater=False)

@@ -117,7 +117,7 @@ START_PRINT TOOLS=0:220,2:240 BED=60 MESH=adaptive SOAK=300
 | `BED=`, `NOZZLE=`, `LAYER=` | the print's bed, nozzle and first-layer height |
 | `CLEAN=0` | skip the pre-print purge and wipe; the first tool is just grabbed |
 | `PURGE=<mm>` | purge length for every tool's clean (default 50). `PURGE=0` wipes without purging |
-| `MESH=` | `off`, `default`, `adaptive` or `thermal` for this print, instead of `BED_MESH_MODE`'s choice (below). `LEVEL=1` still works and means `adaptive` |
+| `MESH=` | `auto`, `off`, `fixed`, `adaptive` or `thermal` for this print, instead of `BED_MESH_MODE`'s choice (below) |
 | `SOAK=<seconds>` | dwell after the bed reaches target. The app waited 5 minutes; the default here is 0 |
 
 The order: the bed and every tool start heating at once — the tools to 100 °C
@@ -132,7 +132,7 @@ rests a second on the pad (`clean_hot_dwell` in `ff-filament.cfg`) and lifts
 ### Which mesh: `BED_MESH_MODE`
 
 ```gcode
-BED_MESH_MODE MODE=adaptive     ; auto | off | default | adaptive | thermal
+BED_MESH_MODE MODE=adaptive     ; auto | off | fixed | adaptive | thermal
 BED_MESH_MODE                   ; show the current choice
 ```
 
@@ -140,7 +140,7 @@ BED_MESH_MODE                   ; show the current choice
 |---|---|
 | `auto` | **the default.** The thermal map's match, as `thermal` — but if there is no map, or the four probed points are more than 0.05 mm rms (`variable_auto_max_rms`) off the best the map can produce, it probes `adaptive` instead. Until you have swept a map, that means an adaptive probe every print |
 | `off` | no mesh: the print runs on the homed plane, and the flow mesh is not started |
-| `default` | loads the saved `MESH_DATA` — the factory mesh, or yours saved over it. No probing |
+| `fixed` | loads the saved `MESH_DATA` — the factory mesh, or yours saved over it. No probing |
 | `adaptive` | probes only where the print is: the file's objects and its prime tower, plus 16 mm (`variable_adaptive_margin`). A file without labelled objects is probed over the whole bed |
 | `thermal` | probes the [thermal map](thermal-mesh.md)'s four points and loads the matching mesh; `MESH_DATA` without a map |
 

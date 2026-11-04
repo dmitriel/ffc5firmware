@@ -16,14 +16,15 @@ both printer models or through every real-world workflow.
   layer, until the effective mesh is flat. `FLOW_MESH_TOGGLE ENABLE=1` uses it
   for the next print. Off by default and not yet tested on hardware. See
   [the flow mesh page](docs/flow-mesh.md).
-- One bed-mesh selector, `BED_MESH_MODE MODE=auto|off|default|adaptive|thermal`,
+- One bed-mesh selector, `BED_MESH_MODE MODE=auto|off|fixed|adaptive|thermal`,
   for the mesh `START_PRINT` uses: none, the saved `MESH_DATA`, a fresh mesh
   over just the file's objects and prime tower, or the thermal map's match
   (`MESH_DATA` without a map). The default, `auto`, uses the thermal match
   and probes adaptive instead when there is no map or the match is more than
   0.05 mm rms off -- so until a map is swept, every print probes adaptive.
-  `THERMAL_MESH_APPLY` takes `MAX_RMS=` and `FALLBACK=NONE` for it. `START_PRINT MESH=` overrides it for one print;
-  `LEVEL=1` means `adaptive`. The adaptive mesh is now part of `START_PRINT`
+  `THERMAL_MESH_APPLY` takes `MAX_RMS=` and `FALLBACK=NONE` for it.
+  `START_PRINT MESH=` overrides it for one print; `LEVEL=` is gone. The
+  adaptive mesh is now part of `START_PRINT`
   -- `[ff_print]` defines the file's objects ahead of it -- so the slicer
   needs no `ADAPTIVE_MESH` call, and it runs before the first tool's clean.
   Every print says which mesh and strategy it uses. The flow mesh keeps its

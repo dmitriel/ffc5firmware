@@ -47,7 +47,7 @@ nozzle clean; without explicit temperatures each tool is cleaned at the
 temperature its `_FF_FILAMENT.tool_material` maps to; `CLEAN=0` skips the clean (default on: each used tool is grabbed,
 heated, purged 50 mm at the chute with the part fan on, wiped at the
 station, cooled by 100 °C and docked while the bed heats — the app's
-`clearNozzlePrint`); `MESH=adaptive` (or the old `LEVEL=1`) probes a fresh mesh over the print
+`clearNozzlePrint`); `MESH=adaptive` probes a fresh mesh over the print
 area; `SOAK=<seconds>` dwells after the bed reaches target (the app
 waits 5 min; default 0).
 
