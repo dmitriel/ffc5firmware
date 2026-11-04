@@ -615,3 +615,34 @@ def test_no_map_with_fallback_none_is_recorded_not_raised(tm, tmp_path):
     assert obj.last_apply["accepted"] is False
     assert "no map" in obj.last_apply["reason"]
     assert printer.gcode.scripts == []
+
+
+
+def test_reuse_probe_takes_the_points_just_probed(tm, tmp_path):
+    probes = []
+    # A plate the map never saw: auto refuses it on rms ...
+    obj, printer = _map_printer(
+        tm, tmp_path, lambda x, y: probes.append((x, y)) or
+        bed_shape(45., 70., x, y) + 0.2 * (x > 100))
+    apply = printer.gcode.commands["THERMAL_MESH_APPLY"]
+    apply(Gcmd(MAX_RMS=0.05, FALLBACK="NONE", PREPARE=0))
+    assert obj.last_apply["accepted"] is False
+    # ... and adaptive's fallback, with no limit, takes it without probing.
+    touched = len(probes)
+    gcmd = Gcmd(FALLBACK="NONE", PREPARE=0, REUSE_PROBE=1)
+    apply(gcmd)
+    assert len(probes) == touched                    # no new touches
+    assert obj.last_apply["accepted"] is True
+    assert "reusing the points probed" in gcmd.info[-1]
+
+
+def test_without_reuse_probe_the_points_are_probed_again(tm, tmp_path):
+    probes = []
+    obj, printer = _map_printer(
+        tm, tmp_path,
+        lambda x, y: probes.append((x, y)) or bed_shape(45., 70., x, y))
+    apply = printer.gcode.commands["THERMAL_MESH_APPLY"]
+    apply(Gcmd(FALLBACK="NONE", PREPARE=0))
+    touched = len(probes)
+    apply(Gcmd(FALLBACK="NONE", PREPARE=0))
+    assert len(probes) == 2 * touched

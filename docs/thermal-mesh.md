@@ -137,7 +137,10 @@ nothing; `FALLBACK=NONE` makes that, and a missing map, a recorded result
 rather than an error -- `printer.ff_thermal_mesh.last_apply.accepted` and
 `.reason`, which `auto` reads. `PREPARE=0` skips the
 park and `G28 Z` when the caller has just done both; `FALLBACK=<profile>`
-loads that profile, with a message, when there is no map. `SAVE=` also stores it
+loads that profile, with a message, when there is no map. `REUSE_PROBE=1`
+takes the points an APPLY probed in the last 10 minutes instead of touching
+them again -- how `auto` falls back through `adaptive` to an unlimited
+thermal match without probing twice. `SAVE=` also stores it
 as a bed-mesh profile; `DRY_RUN=1` only reports. The report names the
 matched temperatures, the blend, and the residual at each point — the
 distance between what was probed and the mesh that was loaded.

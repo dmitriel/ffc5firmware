@@ -661,11 +661,15 @@ def test_the_adaptive_probe_defines_objects_and_tower_first(model):
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("objects", [(), ("PRIME_TOWER",)])
-def test_a_file_without_labelled_objects_gets_the_fixed_mesh(model, objects):
+def test_a_file_without_labelled_objects_gets_the_thermal_mesh(model,
+                                                              objects):
     out, info = _render_one(model, "_FF_MESH_ADAPTIVE_PROBE", {},
                             extra=_mesh_printer(objects=objects))
-    assert out == ["_FF_MESH_FIXED"]
-    assert "labels no objects" in info[0]
+    # No MAX_RMS: however far off, and the fixed mesh only without a map.
+    assert out == ["THERMAL_MESH_APPLY PREPARE=0 METHOD=bilinear "
+                   "MATCH=absolute CORRECT=none FALLBACK=NONE REUSE_PROBE=1",
+                   "_FF_MESH_UNLESS_THERMAL ELSE=fixed"]
+    assert "using the thermal mesh" in info[0]
 
 
 @pytest.mark.parametrize("model", MODELS)

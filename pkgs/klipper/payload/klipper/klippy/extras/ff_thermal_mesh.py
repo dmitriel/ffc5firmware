@@ -49,6 +49,9 @@ METHODS = ('bilinear', 'idw', 'nearest', 'temperature')
 CORRECTIONS = ('none', 'offset', 'plane')
 # Far beyond any sweep; restored to the configured value when the sweep ends.
 SWEEP_IDLE_TIMEOUT = 864000.
+# THERMAL_MESH_APPLY REUSE_PROBE=1 takes an earlier APPLY's points if this
+# recent: well inside one print start, well short of a changed bed.
+REUSE_PROBE_SECONDS = 600.
 
 
 class SweepAborted(Exception):
@@ -479,6 +482,7 @@ class FFThermalMesh:
                        'last_delta': None, 'samples': 0, 'remaining': 0.,
                        'message': ''}
         self.last_apply = {}
+        self._last_probe = None
         self.printer.register_event_handler('klippy:connect',
                                             self._handle_connect)
         self.printer.register_event_handler('klippy:shutdown',
@@ -972,11 +976,28 @@ class FFThermalMesh:
                 lines.append("lookup at chamber %.1f bed %.1f" % (chamber, bed))
                 correct = 'none'
             else:
-                if gcmd.get_int('PREPARE', 1):
+                coords = [[p['x'], p['y']] for p in points]
+                last = self._last_probe
+                now = self.reactor.monotonic()
+                if (gcmd.get_int('REUSE_PROBE', 0) and last is not None
+                        and last['coords'] == coords
+                        and now - last['time'] < REUSE_PROBE_SECONDS):
+                    # The same four points, probed moments ago by an
+                    # earlier APPLY in this print start: no need to touch
+                    # them again just to judge the match differently.
+                    measured = list(last['measured'])
+                    lines.append("reusing the points probed %.0f s ago"
+                                 % (now - last['time'],))
+                else:
+                    if gcmd.get_int('PREPARE', 1):
+                        self.gcode.run_script_from_command(
+                            self.before_sample.render())
+                    measured = self._probe_points(gcmd, points)
                     self.gcode.run_script_from_command(
-                        self.before_sample.render())
-                measured = self._probe_points(gcmd, points)
-                self.gcode.run_script_from_command(self.after_sample.render())
+                        self.after_sample.render())
+                    self._last_probe = {'time': self.reactor.monotonic(),
+                                        'coords': coords,
+                                        'measured': list(measured)}
                 # The matching below is pure Python on a slow host. With a
                 # move still queued (after_sample_gcode's G1 Z10) a stall
                 # of a second ends in "Timer too close", so empty the queue

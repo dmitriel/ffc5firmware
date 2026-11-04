@@ -144,8 +144,8 @@ BED_MESH_MODE                   ; show the current choice
 | `auto` | **the default.** The thermal map's match, as `thermal` — but if there is no map, or the four probed points are more than 0.05 mm rms (`variable_auto_max_rms`) off the best the map can produce, it probes `adaptive` instead. Until you have swept a map, that means an adaptive probe every print |
 | `off` | no mesh: the print runs on the homed plane, and the flow mesh is not started |
 | `fixed` | loads the saved `MESH_DATA` — the factory mesh, or yours saved over it. No probing. With no `MESH_DATA` at all it probes the whole bed into it once; run `SAVE_CONFIG` after that print to keep it |
-| `adaptive` | probes only where the print is: the file's objects and its prime tower, plus 16 mm (`variable_adaptive_margin`). A file without labelled objects (Orca's *Label objects* and *Exclude objects* off) uses `fixed` instead |
-| `thermal` | probes the [thermal map](thermal-mesh.md)'s four points and loads the matching mesh; `fixed` without a map |
+| `adaptive` | probes only where the print is: the file's objects and its prime tower, plus 16 mm (`variable_adaptive_margin`). A file without labelled objects (Orca's *Label objects* and *Exclude objects* off) uses `thermal` instead, however far off its match, and `fixed` only if there is no thermal map |
+| `thermal` | probes the [thermal map](thermal-mesh.md)'s four points and loads the matching mesh, however far off. Only without a map: `fixed` |
 
 The mesh step runs after the soak and the Z re-home, with every tool docked,
 and before the first tool's clean, so the print still starts straight after
