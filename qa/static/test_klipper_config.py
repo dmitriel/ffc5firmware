@@ -680,3 +680,27 @@ def test_purge_0_wipes_without_purging(model):
         "TOOLS": "1", "TEMP": "220", "PURGE": "0"}, extra=_clean_printer())
     assert not any(c.startswith("G1 E") for c in out)
     assert any(c.startswith("_FF_NOZZLE_WIPE") for c in out)
+
+
+def _wipe_printer():
+    return {"tool T1": {"extruder": "extruder1", "gcode_z_offset": 3.2},
+            "gcode_move": {"homing_origin": {"z": 0.}},
+            "toolchanger": {"print_z_offset": 0.05}}
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_the_hot_wipe_rests_a_second_on_the_pad_before_lifting(model):
+    out, _ = _render_one(model, "_FF_NOZZLE_WIPE",
+                         {"TOOL": "1", "TEMP": "220", "COOL": "0"},
+                         extra=_wipe_printer())
+    assert "G4 P1000" in out
+    assert out.index("G4 P1000") < out.index("G1 Z10 F1200")
+    assert not any(c.startswith("TEMPERATURE_WAIT") for c in out)
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_the_cold_wipe_waits_for_the_cooldown_instead(model):
+    out, _ = _render_one(model, "_FF_NOZZLE_WIPE",
+                         {"TOOL": "1", "TEMP": "220"}, extra=_wipe_printer())
+    assert not any(c.startswith("G4") for c in out)
+    assert any(c.startswith("TEMPERATURE_WAIT") for c in out)

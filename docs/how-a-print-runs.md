@@ -126,8 +126,9 @@ below their print temperature. Then a full home; the other tools are purged,
 wiped and parked at that standby temperature while the bed heats; the bed
 wait and soak; the Z re-home and the mesh; the print offset; and **last**
 the tool the print starts with is purged and wiped at print temperature and
-left mounted, so the file's first move follows straight on. That last wipe is hot, so it tears off
-a little less ooze than the cold wipe the others get.
+left mounted, so the file's first move follows straight on. That last wipe is hot -- the nozzle
+rests a second on the pad (`clean_hot_dwell` in `ff-filament.cfg`) and lifts
+-- so it tears off a little less ooze than the cold wipe the others get.
 
 ### Mesh only where the print is
 

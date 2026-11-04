@@ -82,7 +82,8 @@ both printer models or through every real-world workflow.
 - `START_PRINT` heats every tool to 100 °C below its print temperature at
   the start, beside the bed, then cleans the other tools while the bed heats,
   and cleans the tool the print starts with **last**, after the mesh: purged,
-  wiped hot and left mounted, so the print starts without reheating. The
+  wiped hot -- resting 1 s on the pad (`clean_hot_dwell`) -- and left
+  mounted, so the print starts without reheating. The
   separate grab step is gone; the print Z offset is set just before that last
   clean. `DEFER_MESH=1` now means no bed mesh for the print: `START_PRINT`
   skips it and the file's `ADAPTIVE_MESH` does nothing, while the Z re-home
