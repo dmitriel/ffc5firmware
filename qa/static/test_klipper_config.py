@@ -369,7 +369,7 @@ def _idle_file():
 
 @pytest.mark.parametrize("model", MODELS)
 def test_the_bed_starts_heating_before_the_first_homing(model):
-    out, _ = _run(model, "START_PRINT BED=60 TOOL=0 NOZZLE=220 CLEAN=0",
+    out, _ = _run(model, "START_PRINT BED=60 TOOL=0 NOZZLE=220 CLEAN=0 MESH=default",
                   has_heater=model == "Creator5Pro", extra=_idle_file())
     out = _commands(out)
 
@@ -379,7 +379,7 @@ def test_the_bed_starts_heating_before_the_first_homing(model):
 
 @pytest.mark.parametrize("model", MODELS)
 def test_start_print_without_defer_still_meshes_and_grabs_the_first_tool(model):
-    out, _ = _run(model, "START_PRINT BED=60 TOOL=2 NOZZLE=220 CLEAN=0",
+    out, _ = _run(model, "START_PRINT BED=60 TOOL=2 NOZZLE=220 CLEAN=0 MESH=default",
                   has_heater=model == "Creator5Pro", extra=_idle_file())
     out = _commands(out)
 
@@ -498,7 +498,7 @@ def test_start_print_preheats_all_cleans_the_others_then_the_first_last(model):
     assert _first(out, "M140 S60") < preheat < _first(out, "G28")
     # The others are cleaned while the bed heats; the first tool goes last,
     # after the mesh, and the print offset/flow mesh follow without motion.
-    assert others < _first(out, "M190") < _first(out, "_FF_MESH MODE=default")
+    assert others < _first(out, "M190") < _first(out, "_FF_MESH MODE=auto")
     # The print offset (no motion) comes just before the last clean, and the
     # flow mesh starts after it.
     assert _first(out, "_FF_MESH") < \
@@ -570,12 +570,12 @@ def test_the_cold_wipe_waits_for_the_cooldown_instead(model):
 # -- one bed mesh selector -------------------------------------------------
 
 @pytest.mark.parametrize("model", MODELS)
-def test_bed_mesh_mode_sets_one_of_four_and_refuses_the_rest(model):
+def test_bed_mesh_mode_sets_one_of_five_and_refuses_the_rest(model):
     out, info = _run(model, "BED_MESH_MODE MODE=Adaptive", has_heater=False)
     assert out == ["SET_GCODE_VARIABLE MACRO=BED_MESH_MODE VARIABLE=mode "
                    "VALUE=\"'adaptive'\""]
     _out, info = _run(model, "BED_MESH_MODE", has_heater=False)
-    assert "Bed mesh mode: default" in info[0]
+    assert "Bed mesh mode: auto" in info[0]
     with pytest.raises(AssertionError, match="must be one of"):
         _run(model, "BED_MESH_MODE MODE=level", has_heater=False)
 
@@ -589,10 +589,11 @@ def _mesh_printer(objects=(), tower=True):
 @pytest.mark.parametrize("mode, expected", [
     ("off", ["BED_MESH_CLEAR"]),
     ("default", ["BED_MESH_CLEAR", "BED_MESH_PROFILE LOAD=MESH_DATA"]),
-    ("adaptive", ["BED_MESH_CLEAR", "FF_PRINT_DEFINE_OBJECTS",
-                  "DEFINE_PRIME_TOWER_OBJECT", "M106 P1 S0",
-                  "BED_MESH_CALIBRATE ADAPTIVE=1 ADAPTIVE_MARGIN=16",
-                  "SET_VELOCITY_LIMIT ACCEL=20000"]),
+    ("adaptive", ["BED_MESH_CLEAR", "_FF_MESH_ADAPTIVE"]),
+    ("auto", ["BED_MESH_CLEAR",
+              "THERMAL_MESH_APPLY PREPARE=0 METHOD=bilinear MATCH=absolute"
+              " CORRECT=none MAX_RMS=0.05 FALLBACK=NONE",
+              "_FF_MESH_AUTO_FALLBACK"]),
     ("thermal", ["BED_MESH_CLEAR",
                  "THERMAL_MESH_APPLY PREPARE=0 METHOD=bilinear MATCH=absolute"
                  " CORRECT=none FALLBACK=MESH_DATA"]),
@@ -605,17 +606,42 @@ def test_the_mesh_step_for_each_mode(model, mode, expected):
 
 @pytest.mark.parametrize("model", MODELS)
 def test_a_prime_tower_the_file_already_defined_is_not_defined_twice(model):
-    out, _ = _render_one(model, "_FF_MESH", {"MODE": "adaptive"},
+    out, _ = _render_one(model, "_FF_MESH_ADAPTIVE", {},
                          extra=_mesh_printer(objects=["PRIME_TOWER", "CUBE"]))
     assert "DEFINE_PRIME_TOWER_OBJECT" not in out
-    out, _ = _render_one(model, "_FF_MESH", {"MODE": "adaptive"},
+    out, _ = _render_one(model, "_FF_MESH_ADAPTIVE", {},
                          extra=_mesh_printer(tower=False))
     assert "DEFINE_PRIME_TOWER_OBJECT" not in out
 
 
 @pytest.mark.parametrize("model", MODELS)
+def test_the_adaptive_probe_defines_objects_and_tower_first(model):
+    out, _ = _render_one(model, "_FF_MESH_ADAPTIVE", {},
+                         extra=_mesh_printer())
+    assert out == ["FF_PRINT_DEFINE_OBJECTS", "DEFINE_PRIME_TOWER_OBJECT",
+                   "M106 P1 S0",
+                   "BED_MESH_CALIBRATE ADAPTIVE=1 ADAPTIVE_MARGIN=16",
+                   "SET_VELOCITY_LIMIT ACCEL=20000"]
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("result, probes", [
+    ({"accepted": True, "reason": "", "rms": 0.012}, False),
+    ({"accepted": False, "reason": "no map in thermal_mesh.json"}, True),
+    ({"accepted": False, "reason": "0.0753 mm rms off, more than MAX_RMS"},
+     True),
+])
+def test_auto_falls_back_to_adaptive_only_when_thermal_is_not_accepted(
+        model, result, probes):
+    out, info = _render_one(model, "_FF_MESH_AUTO_FALLBACK", {}, extra={
+        "ff_thermal_mesh": {"last_apply": result}})
+    assert out == (["_FF_MESH_ADAPTIVE"] if probes else [])
+    assert ("probing adaptive" in info[0]) == probes
+
+
+@pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("params, mode", [
-    ({}, "default"),                       # BED_MESH_MODE's own
+    ({}, "auto"),                          # BED_MESH_MODE's own
     ({"MESH": "Thermal"}, "thermal"),      # this print only
     ({"LEVEL": "1"}, "adaptive"),          # the old full probe
     ({"MESH": "off"}, "off"),

@@ -132,14 +132,15 @@ rests a second on the pad (`clean_hot_dwell` in `ff-filament.cfg`) and lifts
 ### Which mesh: `BED_MESH_MODE`
 
 ```gcode
-BED_MESH_MODE MODE=adaptive     ; off | default | adaptive | thermal
+BED_MESH_MODE MODE=adaptive     ; auto | off | default | adaptive | thermal
 BED_MESH_MODE                   ; show the current choice
 ```
 
 | Mode | The mesh step of `START_PRINT` |
 |---|---|
+| `auto` | **the default.** The thermal map's match, as `thermal` — but if there is no map, or the four probed points are more than 0.05 mm rms (`variable_auto_max_rms`) off the best the map can produce, it probes `adaptive` instead. Until you have swept a map, that means an adaptive probe every print |
 | `off` | no mesh: the print runs on the homed plane, and the flow mesh is not started |
-| `default` | loads the saved `MESH_DATA` — the factory mesh, or yours saved over it. The default |
+| `default` | loads the saved `MESH_DATA` — the factory mesh, or yours saved over it. No probing |
 | `adaptive` | probes only where the print is: the file's objects and its prime tower, plus 16 mm (`variable_adaptive_margin`). A file without labelled objects is probed over the whole bed |
 | `thermal` | probes the [thermal map](thermal-mesh.md)'s four points and loads the matching mesh; `MESH_DATA` without a map |
 
@@ -151,6 +152,9 @@ objects* is on) and defines them before probing, and defines the prime tower
 from the file's own moves rather than the numbers Orca expands into start
 G-code, which in a multi-plate project can belong to another plate. Nothing
 is needed in the slicer's start G-code.
+
+The console says which it took: `Bed mesh: thermal match accepted (0.012 mm
+rms)`, or `thermal not used (...); probing adaptive` with the reason.
 
 `START_PRINT MESH=<mode>` overrides it for one print. The choice is not kept
 across a restart; to make one the default, add this at the end of

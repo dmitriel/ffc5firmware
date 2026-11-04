@@ -235,7 +235,8 @@ class Gcmd:
         return int(self.params.get(name, default))
 
     def get_float(self, name, default=None, minval=None, above=None):
-        return float(self.params.get(name, default))
+        value = self.params.get(name, default)
+        return None if value is None else float(value)
 
     def respond_info(self, msg):
         self.info.append(msg)
@@ -558,3 +559,59 @@ def test_prepare_0_skips_the_park_and_homing(tm, tmp_path):
         Gcmd(METHOD="nearest", PREPARE=0))
     assert "G28 Z" not in printer.gcode.scripts
     assert printer.gcode.scripts == ["G1 Z10"]
+
+
+
+def _map_printer(tm, tmp_path, z_at, with_points=True):
+    entries = mesh_map(tm)
+    data = {"version": 1, "mesh_params": PARAMS, "entries": entries}
+    if with_points:
+        data["analysis"] = {"points": points_for(tm, entries)}
+    path = tmp_path / "thermal_mesh.json"
+    path.write_text(json.dumps(data))
+    printer = Printer()
+    obj = tm.FFThermalMesh(Config(printer, data_file=str(path)))
+    printer.handlers["klippy:connect"]()
+    obj.probe_helper.z_at = z_at
+    return obj, printer
+
+
+def test_a_match_within_max_rms_is_accepted_and_loaded(tm, tmp_path):
+    obj, printer = _map_printer(tm, tmp_path,
+                                lambda x, y: bed_shape(45., 70., x, y))
+    printer.gcode.commands["THERMAL_MESH_APPLY"](
+        Gcmd(MAX_RMS=0.05, FALLBACK="NONE", PREPARE=0))
+    assert obj.last_apply["accepted"] is True
+    assert obj.last_apply["rms"] < 0.001
+    assert printer.bed_mesh.mesh is not None
+
+
+def test_a_match_beyond_max_rms_loads_nothing_and_says_why(tm, tmp_path):
+    # A plate 0.2 mm off every map entry: the fit cannot reach it.
+    obj, printer = _map_printer(
+        tm, tmp_path, lambda x, y: bed_shape(45., 70., x, y) + 0.2 * (x > 100))
+    gcmd = Gcmd(MAX_RMS=0.05, FALLBACK="NONE", PREPARE=0)
+    printer.gcode.commands["THERMAL_MESH_APPLY"](gcmd)
+    assert obj.last_apply["accepted"] is False
+    assert "MAX_RMS" in obj.last_apply["reason"]
+    assert printer.bed_mesh.mesh is None
+    assert any("thermal mesh not used" in m for m in gcmd.info)
+
+
+def test_without_a_fallback_a_bad_match_is_an_error(tm, tmp_path):
+    obj, printer = _map_printer(
+        tm, tmp_path, lambda x, y: bed_shape(45., 70., x, y) + 0.2 * (x > 100))
+    with pytest.raises(RuntimeError, match="MAX_RMS"):
+        printer.gcode.commands["THERMAL_MESH_APPLY"](
+            Gcmd(MAX_RMS=0.05, PREPARE=0))
+
+
+def test_no_map_with_fallback_none_is_recorded_not_raised(tm, tmp_path):
+    printer = Printer()
+    obj = tm.FFThermalMesh(Config(printer, data_file=str(tmp_path / "x.json")))
+    printer.handlers["klippy:connect"]()
+    printer.gcode.commands["THERMAL_MESH_APPLY"](
+        Gcmd(FALLBACK="NONE", PREPARE=0))
+    assert obj.last_apply["accepted"] is False
+    assert "no map" in obj.last_apply["reason"]
+    assert printer.gcode.scripts == []

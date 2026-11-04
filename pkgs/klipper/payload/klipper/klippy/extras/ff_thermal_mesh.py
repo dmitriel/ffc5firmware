@@ -932,16 +932,32 @@ class FFThermalMesh:
                              % (', '.join(CORRECTIONS),))
         relative = gcmd.get('MATCH', 'absolute').lower() == 'relative'
         fallback = gcmd.get('FALLBACK', None)
+        max_rms = gcmd.get_float('MAX_RMS', None, above=0.)
+        # Cleared first: a caller reading last_apply after this command must
+        # never see the previous run's result.
+        self.last_apply = {'accepted': False, 'reason': 'running'}
+
+        def give_up(reason, **extra):
+            """No map, or a match too far off. Without FALLBACK that is an
+            error; FALLBACK=<profile> loads that profile instead (a print
+            start: no map is no reason to refuse the print); FALLBACK=NONE
+            loads nothing and leaves the decision to the caller, which reads
+            printer.ff_thermal_mesh.last_apply."""
+            self.last_apply = dict(extra, accepted=False, reason=reason)
+            if not fallback:
+                raise gcmd.error("thermal mesh: %s" % (reason,))
+            if fallback.upper() == 'NONE':
+                gcmd.respond_info("thermal mesh not used: %s" % (reason,))
+                return
+            gcmd.respond_info("thermal mesh not used: %s -- loading %s instead"
+                              % (reason, fallback))
+            self.gcode.run_script_from_command(
+                'BED_MESH_PROFILE LOAD=%s' % (fallback,))
+
         try:
             data = self._require_map(need_points=method != 'temperature')
         except self.gcode.error as e:
-            if not fallback:
-                raise
-            # A print start: no map is no reason to refuse the print.
-            gcmd.respond_info("%s -- loading %s instead" % (e, fallback))
-            self.gcode.run_script_from_command(
-                'BED_MESH_PROFILE LOAD=%s' % (fallback,))
-            return
+            return give_up(str(e).replace("thermal mesh: ", ""))
         entries, params = data['entries'], data['mesh_params']
         points = data.get('analysis', {}).get('points', [])
         measured = None
@@ -988,6 +1004,22 @@ class FFThermalMesh:
             raise gcmd.error("thermal mesh: %s" % (e,))
         matrix, residuals = effective_mesh(weights, params, points, measured,
                                            correct)
+        # How far the map's best answer is from what was just probed, judged
+        # the way MATCH compared them (relative: shape only).
+        fit_rms = None
+        if residuals:
+            fit_rms = residual_rms([-r for r in residuals],
+                                   [0.] * len(residuals), relative)
+            lines.append("fit rms %.4f mm%s" % (
+                fit_rms, "" if max_rms is None else
+                " (limit %.4f)" % (max_rms,)))
+        if max_rms is not None and fit_rms is not None and fit_rms > max_rms:
+            gcmd.respond_info("thermal mesh (%s):\n%s" % (method,
+                                                          "\n".join(lines)))
+            return give_up("the probed points are %.4f mm rms off the map, "
+                           "more than MAX_RMS %.4f" % (fit_rms, max_rms),
+                           rms=fit_rms, measured=measured,
+                           residuals=residuals)
         lines.append("blend: " + ", ".join(
             "%.2f x (chamber %.0f bed %.0f)" % (w, e['chamber'], e['bed'])
             for w, e in sorted(weights, key=lambda t: -t[0])))
@@ -1009,6 +1041,7 @@ class FFThermalMesh:
         else:
             lines.append("dry run: mesh not loaded")
         self.last_apply = {
+            'accepted': True, 'reason': '', 'rms': fit_rms,
             'method': method, 'correct': correct,
             'measured': measured, 'residuals': residuals,
             'weights': [[w, e['chamber'], e['bed']] for w, e in weights]}

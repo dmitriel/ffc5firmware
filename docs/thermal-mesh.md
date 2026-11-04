@@ -95,6 +95,12 @@ mostly noise — and the four points are saved in the map file.
 
 ### In prints
 
+`BED_MESH_MODE`'s default, `auto`, already uses the map: it probes the four
+points at every print start and loads the match, unless the match is more
+than 0.05 mm rms off what it probed (`variable_auto_max_rms`) or there is no
+map, in which case it probes an adaptive mesh instead. To use the map
+without that safety net:
+
 ```gcode
 BED_MESH_MODE MODE=thermal
 ```
@@ -125,7 +131,11 @@ THERMAL_MESH_APPLY [METHOD=bilinear] [MATCH=absolute] [CORRECT=none] [SAVE=<prof
 
 It runs `before_sample_gcode` (park, `G28 Z`, as the sweep did before every
 mesh), probes the four points, compares them with every mesh in the map,
-builds an effective mesh and makes it the active one. `PREPARE=0` skips the
+builds an effective mesh and makes it the active one. `MAX_RMS=<mm>` refuses
+a match whose residual rms (in the `MATCH` sense) is larger, and loads
+nothing; `FALLBACK=NONE` makes that, and a missing map, a recorded result
+rather than an error -- `printer.ff_thermal_mesh.last_apply.accepted` and
+`.reason`, which `auto` reads. `PREPARE=0` skips the
 park and `G28 Z` when the caller has just done both; `FALLBACK=<profile>`
 loads that profile, with a message, when there is no map. `SAVE=` also stores it
 as a bed-mesh profile; `DRY_RUN=1` only reports. The report names the
