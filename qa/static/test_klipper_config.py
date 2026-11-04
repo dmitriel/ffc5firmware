@@ -364,7 +364,8 @@ def _idle_file():
     return {"ff_toolchange": {
         "calibrated_tools": [0, 1, 2, 3], "docked_tools": [0, 1, 2, 3],
         "current_tool": -1, "station_z": 1.0, "print_offset_ready": True,
-        "state_ok": True, "state_reason": ""}}
+        "state_ok": True, "state_reason": ""},
+        "bed_mesh": {"profiles": {"MESH_DATA": {}}}}
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -588,15 +589,16 @@ def _mesh_printer(objects=(), tower=True):
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("mode, expected", [
     ("off", ["BED_MESH_CLEAR"]),
-    ("fixed", ["BED_MESH_CLEAR", "BED_MESH_PROFILE LOAD=MESH_DATA"]),
+    ("fixed", ["BED_MESH_CLEAR", "_FF_MESH_FIXED"]),
     ("adaptive", ["BED_MESH_CLEAR", "_FF_MESH_ADAPTIVE"]),
     ("auto", ["BED_MESH_CLEAR",
               "THERMAL_MESH_APPLY PREPARE=0 METHOD=bilinear MATCH=absolute"
               " CORRECT=none MAX_RMS=0.05 FALLBACK=NONE",
-              "_FF_MESH_AUTO_FALLBACK"]),
+              "_FF_MESH_UNLESS_THERMAL ELSE=adaptive"]),
     ("thermal", ["BED_MESH_CLEAR",
                  "THERMAL_MESH_APPLY PREPARE=0 METHOD=bilinear MATCH=absolute"
-                 " CORRECT=none FALLBACK=MESH_DATA"]),
+                 " CORRECT=none FALLBACK=NONE",
+                 "_FF_MESH_UNLESS_THERMAL ELSE=fixed"]),
 ])
 def test_the_mesh_step_for_each_mode(model, mode, expected):
     out, _ = _render_one(model, "_FF_MESH", {"MODE": mode},
@@ -606,11 +608,11 @@ def test_the_mesh_step_for_each_mode(model, mode, expected):
 
 @pytest.mark.parametrize("model", MODELS)
 def test_a_prime_tower_the_file_already_defined_is_not_defined_twice(model):
-    out, _ = _render_one(model, "_FF_MESH_ADAPTIVE", {},
+    out, _ = _render_one(model, "_FF_MESH_ADAPTIVE_PROBE", {},
                          extra=_mesh_printer(objects=["PRIME_TOWER", "CUBE"]))
     assert "DEFINE_PRIME_TOWER_OBJECT" not in out
-    out, _ = _render_one(model, "_FF_MESH_ADAPTIVE", {},
-                         extra=_mesh_printer(tower=False))
+    out, _ = _render_one(model, "_FF_MESH_ADAPTIVE_PROBE", {},
+                         extra=_mesh_printer(objects=["CUBE"], tower=False))
     assert "DEFINE_PRIME_TOWER_OBJECT" not in out
 
 
@@ -618,10 +620,38 @@ def test_a_prime_tower_the_file_already_defined_is_not_defined_twice(model):
 def test_the_adaptive_probe_defines_objects_and_tower_first(model):
     out, _ = _render_one(model, "_FF_MESH_ADAPTIVE", {},
                          extra=_mesh_printer())
-    assert out == ["FF_PRINT_DEFINE_OBJECTS", "DEFINE_PRIME_TOWER_OBJECT",
-                   "M106 P1 S0",
+    # The decision is a second macro, rendered after the objects exist.
+    assert out == ["FF_PRINT_DEFINE_OBJECTS", "_FF_MESH_ADAPTIVE_PROBE"]
+    out, _ = _render_one(model, "_FF_MESH_ADAPTIVE_PROBE", {},
+                         extra=_mesh_printer(objects=["CUBE"]))
+    assert out == ["DEFINE_PRIME_TOWER_OBJECT", "M106 P1 S0",
                    "BED_MESH_CALIBRATE ADAPTIVE=1 ADAPTIVE_MARGIN=16",
                    "SET_VELOCITY_LIMIT ACCEL=20000"]
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("objects", [(), ("PRIME_TOWER",)])
+def test_a_file_without_labelled_objects_gets_the_fixed_mesh(model, objects):
+    out, info = _render_one(model, "_FF_MESH_ADAPTIVE_PROBE", {},
+                            extra=_mesh_printer(objects=objects))
+    assert out == ["_FF_MESH_FIXED"]
+    assert "labels no objects" in info[0]
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("profiles, expected", [
+    ({"MESH_DATA": {}, "default": {}}, ["BED_MESH_PROFILE LOAD=MESH_DATA"]),
+    ({"default": {}}, ["M106 P1 S0", "BED_MESH_CALIBRATE PROFILE=MESH_DATA",
+                       "SET_VELOCITY_LIMIT ACCEL=20000"]),
+])
+def test_fixed_loads_mesh_data_or_probes_the_bed_into_it(model, profiles,
+                                                         expected):
+    out, info = _render_one(model, "_FF_MESH_FIXED", {},
+                            extra={"bed_mesh": {"profiles": profiles}})
+    assert out == expected
+    assert bool(info) == ("MESH_DATA" not in profiles)
+    if info:
+        assert "SAVE_CONFIG" in info[0]
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -633,10 +663,15 @@ def test_the_adaptive_probe_defines_objects_and_tower_first(model):
 ])
 def test_auto_falls_back_to_adaptive_only_when_thermal_is_not_accepted(
         model, result, probes):
-    out, info = _render_one(model, "_FF_MESH_AUTO_FALLBACK", {}, extra={
-        "ff_thermal_mesh": {"last_apply": result}})
+    extra = {"ff_thermal_mesh": {"last_apply": result}}
+    out, info = _render_one(model, "_FF_MESH_UNLESS_THERMAL",
+                            {"ELSE": "adaptive"}, extra=extra)
     assert out == (["_FF_MESH_ADAPTIVE"] if probes else [])
-    assert ("probing adaptive" in info[0]) == probes
+    assert ("adaptive instead" in info[0]) == probes
+    # thermal mode: the fixed mesh instead.
+    out, _ = _render_one(model, "_FF_MESH_UNLESS_THERMAL", {"ELSE": "fixed"},
+                         extra=extra)
+    assert out == (["_FF_MESH_FIXED"] if probes else [])
 
 
 @pytest.mark.parametrize("model", MODELS)

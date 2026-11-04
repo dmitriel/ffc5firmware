@@ -22,6 +22,9 @@ both printer models or through every real-world workflow.
   (`MESH_DATA` without a map). The default, `auto`, uses the thermal match
   and probes adaptive instead when there is no map or the match is more than
   0.05 mm rms off -- so until a map is swept, every print probes adaptive.
+  A file without labelled objects gets the fixed mesh, not a whole-bed
+  probe; and with no `MESH_DATA` saved, the fixed mesh probes the whole bed
+  into it once (`SAVE_CONFIG` afterwards keeps it).
   `THERMAL_MESH_APPLY` takes `MAX_RMS=` and `FALLBACK=NONE` for it.
   `START_PRINT MESH=` overrides it for one print; `LEVEL=` is gone. The
   adaptive mesh is now part of `START_PRINT`
