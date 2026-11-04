@@ -29,6 +29,11 @@
 #                lowest-numbered one it uses
 #   layer        the first `;HEIGHT:` -- the FIRST layer's height, which is
 #                what the print Z offset's thin-layer term wants
+#   objects      every `EXCLUDE_OBJECT_DEFINE NAME=...` line, which Orca writes
+#                at the top, before the start G-code. START_PRINT's adaptive
+#                mesh runs before the file does, so FF_PRINT_DEFINE_OBJECTS
+#                replays them for it; loading the file then clears them and
+#                the file defines them again itself.
 #   prime tower  Orca's single resolved wipe_tower_x/y plus width/brim/rotation
 #                values. In a multi-plate project the start-G-code placeholder
 #                may incorrectly expand to the first value of a comma-separated
@@ -53,6 +58,7 @@ EXTRUDER_COUNT = 4
 # Bounded read: everything parsed sits within ~8 KB of the start on real
 # files, so this is a wide margin rather than a guess.
 HEAD_BYTES = 256 * 1024
+MAX_OBJECT_DEFINES = 500
 TAIL_BYTES = 256 * 1024
 
 # print_stats states that mean the job is over (as opposed to paused mid-print).
@@ -97,6 +103,11 @@ def _parse_metadata(path):
     # First-layer height, from the per-layer marker the slicer emits. This
     # feeds the print Z offset's thin-layer term, which is a FIRST-layer
     # correction.
+    defines = re.findall(r'^EXCLUDE_OBJECT_DEFINE\s+NAME=.*$', head, re.M)
+    if defines:
+        metadata['object_defines'] = [d.strip() for d in
+                                      defines[:MAX_OBJECT_DEFINES]]
+
     layer_match = re.search(r'^;HEIGHT:([0-9.]+)', head, re.M)
     if layer_match is not None:
         try:
@@ -295,6 +306,31 @@ class FFPrint:
                                             self._handle_connect)
         self.printer.register_event_handler('idle_timeout:ready',
                                             self._handle_ready)
+        self.gcode.register_command(
+            'FF_PRINT_DEFINE_OBJECTS', self.cmd_FF_PRINT_DEFINE_OBJECTS,
+            desc="Define the current file's objects ahead of the file, for"
+                 " an adaptive mesh")
+
+    def cmd_FF_PRINT_DEFINE_OBJECTS(self, gcmd):
+        """Replay the file's EXCLUDE_OBJECT_DEFINE lines, unless Klipper
+        already knows objects -- the file has run its own (a slicer start
+        G-code that calls START_PRINT itself), and those win."""
+        exclude = self.printer.lookup_object('exclude_object', None)
+        defines = self.metadata.get('object_defines') or []
+        if exclude is None:
+            gcmd.respond_info("ff_print: no [exclude_object]; the mesh "
+                              "cannot be fitted to the objects")
+            return
+        if exclude.objects:
+            return
+        if not defines:
+            gcmd.respond_info("ff_print: the file defines no objects; an "
+                              "adaptive mesh covers the whole bed")
+            return
+        for line in defines:
+            self.gcode.run_script_from_command(line)
+        gcmd.respond_info("ff_print: %d object(s) defined from the file for "
+                          "the mesh" % (len(defines),))
 
     def _handle_connect(self):
         # Same rename dance gcode_macro uses for rename_existing: take the
@@ -328,6 +364,7 @@ class FFPrint:
             'nozzle': self.metadata.get('nozzle'),
             'bed': self.metadata.get('bed'),
             'layer': self.metadata.get('layer'),
+            'objects': len(self.metadata.get('object_defines') or []),
             'prime_tower_x': self.metadata.get('prime_tower_x'),
             'prime_tower_y': self.metadata.get('prime_tower_y'),
             'prime_tower_width': self.metadata.get('prime_tower_width'),
