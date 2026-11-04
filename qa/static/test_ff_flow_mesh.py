@@ -160,7 +160,7 @@ def started(fm, mesh_z, **kw):
     printer = Printer(mesh_z, **kw)
     obj = fm.FFFlowMesh(Config(printer, min_thickness=0.1,
                                split_distance=2.))
-    obj.start(0.1, None)
+    obj.start(0.1, None, 0.2)
     return obj, printer
 
 
@@ -258,10 +258,10 @@ def test_it_refuses_without_a_mesh_or_with_fade(fm):
     printer = Printer(lambda x, y: 0., fade=True)
     obj = fm.FFFlowMesh(Config(printer))
     with pytest.raises(RuntimeError, match="fade"):
-        obj.start(0.1, None)
+        obj.start(0.1, None, 0.2)
     printer.objects["bed_mesh"].get_mesh = lambda: None
     with pytest.raises(RuntimeError, match="no bed mesh"):
-        obj.start(0.1, None)
+        obj.start(0.1, None, 0.2)
 
 
 def test_a_purge_line_above_the_first_layer_does_not_count(fm):
@@ -269,3 +269,38 @@ def test_a_purge_line_above_the_first_layer_does_not_count(fm):
     line(obj, 0., 10., 0.3, 0., 1.)                  # purge at Z 0.3
     line(obj, 10., 0., 0.2, 1., 2.)                  # first layer
     assert obj.layers.tops == [0.2]
+
+
+# -- the first layer comes from the print start --------------------------
+
+def test_the_first_layer_is_known_before_anything_is_printed(fm):
+    obj, printer = started(fm, lambda x, y: 0.15)
+    assert obj.layers.tops == [0.2]
+    # The very first travel down already sits at layer 1's offset.
+    obj.move([0., 10., 5., 0.], 100.)
+    assert printer.next.moves[-1][2] + 0.15 == pytest.approx(5.05)
+
+
+def test_an_extrusion_below_the_first_layer_is_still_layer_one(fm):
+    layers = fm.LayerTracker(0.2)
+    assert not layers.note_extrusion(0.18)
+    assert layers.note_extrusion(0.4)
+    assert layers.note_extrusion(0.15)          # back down: layer 1 again
+    assert layers.tops == [0.2]
+
+
+def test_a_first_extrusion_off_the_given_height_is_reported(fm):
+    obj, printer = started(fm, lambda x, y: 0.)
+    line(obj, 0., 10., 0.3, 0., 1.)
+    assert any("first extrusion is at Z 0.300" in m
+               for m in printer.gcode.info)
+    printer.gcode.info.clear()
+    line(obj, 10., 0., 0.2, 1., 2.)
+    assert not any("first extrusion" in m for m in printer.gcode.info)
+
+
+def test_starting_without_a_first_layer_is_refused(fm):
+    printer = Printer(lambda x, y: 0.)
+    obj = fm.FFFlowMesh(Config(printer))
+    with pytest.raises(RuntimeError, match="first layer height"):
+        obj.start(0.1, None, 0.)

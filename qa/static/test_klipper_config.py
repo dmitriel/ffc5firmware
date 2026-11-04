@@ -475,8 +475,30 @@ def test_the_thermal_toggle_flips_and_validates(model):
 
 @pytest.mark.parametrize("model", MODELS)
 def test_a_print_says_which_mesh_strategy_it_uses(model):
-    _out, info = _run(model, "_FF_FLOW_MESH_BEGIN", has_heater=False)
+    _out, info = _run(model, "_FF_FLOW_MESH_BEGIN FIRST_LAYER=0.2",
+                      has_heater=False)
     assert "Bed mesh strategy: standard" in info[0]
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("first, started", [("0.24", True), ("0", False)])
+def test_the_flow_mesh_takes_the_first_layer_from_the_print_start(
+        model, first, started):
+    on = {"gcode_macro FLOW_MESH_TOGGLE": {"enabled": 1}}
+    out, info = _run(model, "_FF_FLOW_MESH_BEGIN FIRST_LAYER=%s" % first,
+                     has_heater=False, extra=on)
+    if started:
+        assert out == ["FLOW_MESH_START FIRST_LAYER=0.24"]
+    else:
+        assert out == [] and "needs the first layer height" in info[0]
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_print_start_hands_its_layer_to_the_flow_mesh(model):
+    cp = _parse(model)
+    for macro in ("START_PRINT", "ADAPTIVE_MESH"):
+        assert "_FF_FLOW_MESH_BEGIN FIRST_LAYER={layer}" in cp.get(
+            "gcode_macro " + macro, "gcode")
 
 
 @pytest.mark.parametrize("model", MODELS)

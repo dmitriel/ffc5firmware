@@ -31,7 +31,7 @@ this at the end of `printer.cfg`:
 variable_enabled: 1
 ``` You can also start
 it yourself after the mesh is loaded:
-`FLOW_MESH_START [MIN_THICKNESS=0.1] [MAX_THICKNESS=0.4]`.
+`FLOW_MESH_START FIRST_LAYER=0.2 [MIN_THICKNESS=0.1] [MAX_THICKNESS=0.4]`.
 
 ---
 
@@ -75,9 +75,16 @@ never forced to the limit on a flat spot; it keeps its own height there.
   high spot the layer is thinner and carries less plastic, over a low spot
   more. If your first layer is already close to the minimum, raise the
   slicer's first-layer height rather than lowering `min_thickness`.
-* **Layers are detected from the file**: a new layer is the first extruding
-  move at a higher Z. A purge or prime line printed higher than the first
-  layer is discarded when the first layer starts below it. Vase mode
+* **The first layer's height comes from the print start**, the `LAYER=`
+  that `START_PRINT` and `ADAPTIVE_MESH` already take (filled in from the
+  file's first `;HEIGHT:` when the printer starts the print itself). If it is
+  missing, the print says so and uses the standard mesh. In a slicer's start
+  G-code pass the *first* layer's height, e.g. Orca's
+  `LAYER=[initial_layer_print_height]`. If the file's first extrusion is at
+  another height the console warns, which is harmless for a purge line.
+* **Layers above the first are detected from the file**: a new layer is the
+  first extruding move at a higher Z. A purge or prime line printed higher
+  than the first layer is discarded when the first layer starts. Vase mode
   works once its solid bottom layers are done; it is not meant for a spiral
   that starts on the plate.
 * **Babysteps still work.** Layers are measured without the babystep, and

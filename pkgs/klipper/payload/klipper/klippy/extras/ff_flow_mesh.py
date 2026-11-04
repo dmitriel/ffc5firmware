@@ -32,11 +32,16 @@ A flat bed (r = 0) gives t = h everywhere, which is plain printing. Limits
 are widened to h itself for a layer thinner than min_thickness or thicker
 than max_thickness, so such a layer is never forced off its own height.
 
-LAYERS are the G-code Z of extruding moves (X/Y travel with E going
-forward), measured without the babystep. An extruding move higher than the
-current layer starts a new one; one lower drops every layer at or above it,
-which is what a purge line printed higher than the first layer, or
-sequential printing, looks like. Travel slightly above the current layer
+LAYERS. The first layer's height is given by the print start
+(START_PRINT / ADAPTIVE_MESH LAYER=, which [ff_print] reads from the file's
+first ;HEIGHT:), so layer 1 is known before anything is printed: the
+approach, the skirt and the first line all sit at its offset, and an
+extrusion at or below it is always layer 1. Layers above it are the G-code
+Z of extruding moves (X/Y travel with E going forward), measured without
+the babystep: one higher than the current layer starts a new one, one lower
+drops every layer above it -- a purge line printed above the first layer,
+or sequential printing. If the file's first extrusion is not at the given
+height, a warning says so. Travel slightly above the current layer
 (less than a max thickness) is treated as the approach to the next one, so
 the nozzle descends to the right height before it starts extruding; travel
 higher than that, a Z-hop, keeps the current layer's offset.
@@ -79,8 +84,9 @@ def layer_surface(mesh_z, heights, min_thickness, max_thickness):
 class LayerTracker:
     """The G-code Z of each layer printed so far, bottom first."""
 
-    def __init__(self):
-        self.tops = []
+    def __init__(self, first=None):
+        self.first = first
+        self.tops = [first] if first else []
 
     def top(self):
         return self.tops[-1] if self.tops else 0.
@@ -98,6 +104,12 @@ class LayerTracker:
             return False
         if z <= EPSILON:
             return False
+        if self.first and z < self.first + EPSILON:
+            # Inside the first layer, whose height the print start gave.
+            if len(self.tops) == 1:
+                return False
+            self.tops = [self.first]
+            return True
         if self.tops and z < self.tops[-1]:
             self.tops = [t for t in self.tops if t < z - EPSILON]
         self.tops.append(z)
@@ -115,6 +127,7 @@ class FFFlowMesh:
         self.next_transform = None
         self.active = False
         self.layers = LayerTracker()
+        self.first_seen = False
         self.flat_layer = None
         self.max_residual = 0.
         self.run_min = self.run_max = None
@@ -216,6 +229,15 @@ class FFFlowMesh:
         dxy = math.hypot(x - lx, y - ly)
         de = e - le
         extruding = dxy > 0. and de > 0.
+        if extruding and not self.first_seen:
+            self.first_seen = True
+            first = self.layers.first
+            if first and abs(z - babystep - first) > 0.01:
+                self.gcode.respond_info(
+                    "flow mesh: WARNING: the file's first extrusion is at Z "
+                    "%.3f, but the print start gave a first layer of %.3f "
+                    "(fine for a purge or prime line; otherwise check the "
+                    "slicer's LAYER=)" % (z - babystep, first))
         if extruding and self.layers.note_extrusion(z - babystep):
             if self.flat_layer is not None and \
                     len(self.layers.tops) <= self.flat_layer:
@@ -243,7 +265,7 @@ class FFFlowMesh:
                 pos[3] - self.e_shift] + list(pos[4:])
 
     # -- commands ----------------------------------------------------------
-    def start(self, min_thickness, max_thickness):
+    def start(self, min_thickness, max_thickness, first_layer):
         bed_mesh = self.printer.lookup_object('bed_mesh', None)
         if bed_mesh is None or bed_mesh.get_mesh() is None:
             raise self.gcode.error("flow mesh: no bed mesh is loaded")
@@ -251,11 +273,16 @@ class FFFlowMesh:
             raise self.gcode.error(
                 "flow mesh: bed_mesh fade is configured; it already thins "
                 "the mesh with height and the two cannot be combined")
+        if first_layer <= 0.:
+            raise self.gcode.error("flow mesh: the first layer height is "
+                                   "needed (FIRST_LAYER=)")
         self.run_min = min_thickness
         self.run_max = max_thickness
-        self.layers = LayerTracker()
+        self.layers = LayerTracker(first_layer)
+        self.first_seen = False
         self.flat_layer = None
         self.max_residual = 0.
+        self._check_flat()
         if self.active:
             return
         gcode_move = self.printer.lookup_object('gcode_move')
@@ -293,11 +320,12 @@ class FFFlowMesh:
         hi = hi if hi > 0. else None
         if hi is not None and hi < lo:
             raise gcmd.error("flow mesh: MAX_THICKNESS is below MIN_THICKNESS")
-        self.start(lo, hi)
+        first = gcmd.get_float('FIRST_LAYER', above=0.)
+        self.start(lo, hi, first)
         gcmd.respond_info(
-            "flow mesh: on -- first layers keep a flat nozzle and absorb the "
-            "mesh, %.2f..%s mm thick" % (lo, '%.2f' % hi if hi else
-                                         'nozzle diameter'))
+            "flow mesh: on -- first layer %.3f mm; the first layers keep a "
+            "flat nozzle and absorb the mesh, %.2f..%s mm thick"
+            % (first, lo, '%.2f' % hi if hi else 'nozzle diameter'))
 
     def cmd_FLOW_MESH_STOP(self, gcmd):
         if self.stop():
