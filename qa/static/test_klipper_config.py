@@ -181,6 +181,8 @@ def _run(model, command, has_heater, extra=None):
     env = jinja2.Environment("{%", "%}", "{", "}")
     out, info = [], []
 
+    running = []
+
     def step(line, depth=0):
         assert depth < 10, "macro recursion in %s" % command
         line = line.strip()
@@ -192,6 +194,11 @@ def _run(model, command, has_heater, extra=None):
         if sec is None or not cp.has_option(sec, "gcode"):
             out.append(line)
             return
+        # klippy's gcode_macro refuses a macro that is already running
+        # ("Macro X called recursively"), however deep the chain.
+        assert cmd not in running, "Macro %s called recursively (via %s)" % (
+            cmd, " -> ".join(running))
+        running.append(cmd)
         rendered = env.from_string(cp.get(sec, "gcode")).render(
             params=_parse_params(line, cmd),
             rawparams=line[len(line.split()[0]):].strip(),
@@ -201,6 +208,7 @@ def _run(model, command, has_heater, extra=None):
         )
         for sub in rendered.splitlines():
             step(sub, depth + 1)
+        running.pop()
 
     step(command)
     return out, info
@@ -624,11 +632,11 @@ def _mesh_printer(objects=(), tower=True):
     ("auto", ["BED_MESH_CLEAR",
               "THERMAL_MESH_APPLY PREPARE=0 METHOD=bilinear MATCH=absolute"
               " CORRECT=none MAX_RMS=0.05 FALLBACK=NONE",
-              "_FF_MESH_UNLESS_THERMAL ELSE=adaptive"]),
+              "_FF_MESH_THERMAL_OR_ADAPTIVE"]),
     ("thermal", ["BED_MESH_CLEAR",
                  "THERMAL_MESH_APPLY PREPARE=0 METHOD=bilinear MATCH=absolute"
                  " CORRECT=none FALLBACK=NONE",
-                 "_FF_MESH_UNLESS_THERMAL ELSE=fixed"]),
+                 "_FF_MESH_THERMAL_OR_FIXED"]),
 ])
 def test_the_mesh_step_for_each_mode(model, mode, expected):
     out, _ = _render_one(model, "_FF_MESH", {"MODE": mode},
@@ -668,7 +676,7 @@ def test_a_file_without_labelled_objects_gets_the_thermal_mesh(model,
     # No MAX_RMS: however far off, and the fixed mesh only without a map.
     assert out == ["THERMAL_MESH_APPLY PREPARE=0 METHOD=bilinear "
                    "MATCH=absolute CORRECT=none FALLBACK=NONE REUSE_PROBE=1",
-                   "_FF_MESH_UNLESS_THERMAL ELSE=fixed"]
+                   "_FF_MESH_THERMAL_OR_FIXED"]
     assert "using the thermal mesh" in info[0]
 
 
@@ -698,13 +706,12 @@ def test_fixed_loads_mesh_data_or_probes_the_bed_into_it(model, profiles,
 def test_auto_falls_back_to_adaptive_only_when_thermal_is_not_accepted(
         model, result, probes):
     extra = {"ff_thermal_mesh": {"last_apply": result}}
-    out, info = _render_one(model, "_FF_MESH_UNLESS_THERMAL",
-                            {"ELSE": "adaptive"}, extra=extra)
+    out, info = _render_one(model, "_FF_MESH_THERMAL_OR_ADAPTIVE", {},
+                            extra=extra)
     assert out == (["_FF_MESH_ADAPTIVE"] if probes else [])
     assert ("adaptive instead" in info[0]) == probes
     # thermal mode: the fixed mesh instead.
-    out, _ = _render_one(model, "_FF_MESH_UNLESS_THERMAL", {"ELSE": "fixed"},
-                         extra=extra)
+    out, _ = _render_one(model, "_FF_MESH_THERMAL_OR_FIXED", {}, extra=extra)
     assert out == (["_FF_MESH_FIXED"] if probes else [])
 
 
@@ -771,3 +778,36 @@ def test_the_hot_wipe_unretracts_on_the_pad_then_rests_then_lifts(model):
     assert pad < unretract < out.index("G4 P1000") < out.index("G1 Z10 F1200")
     assert out[unretract - 2:unretract] == ["M83", "G92 E0"]
     assert not any(c.startswith("TEMPERATURE_WAIT") for c in out)
+
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_autos_whole_fallback_chain_runs_without_recursion(model):
+    # The failed print: thermal refused on rms, the file has no labelled
+    # objects, so adaptive hands back to an unlimited thermal match -- whose
+    # check must not be the macro already running. With last_apply refused
+    # throughout (a static printer here), the chain runs to the fixed mesh.
+    extra = {"ff_thermal_mesh": {"last_apply": {
+                 "accepted": False, "reason": "0.1606 mm rms off"}},
+             "exclude_object": {"objects": []},
+             "ff_print": {"prime_tower_x": None},
+             "bed_mesh": {"profiles": {"MESH_DATA": {}}}}
+    out, info = _run(model, "_FF_MESH MODE=auto", has_heater=False,
+                     extra=extra)
+    applies = [c for c in out if c.startswith("THERMAL_MESH_APPLY")]
+    assert len(applies) == 2 and "REUSE_PROBE=1" in applies[1]
+    assert "MAX_RMS" in applies[0] and "MAX_RMS" not in applies[1]
+    assert out[-1] == "BED_MESH_PROFILE LOAD=MESH_DATA"
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_no_print_start_path_calls_a_macro_inside_itself(model):
+    base = {"exclude_object": {"objects": []},
+            "ff_print": {"prime_tower_x": None},
+            "bed_mesh": {"profiles": {}}}
+    for accepted in (True, False):
+        extra = dict(base, ff_thermal_mesh={"last_apply": {
+            "accepted": accepted, "reason": "x", "rms": 0.01}})
+        for mode in ("auto", "off", "fixed", "adaptive", "thermal"):
+            _run(model, "_FF_MESH MODE=%s" % mode, has_heater=False,
+                 extra=extra)
