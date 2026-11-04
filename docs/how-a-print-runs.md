@@ -115,10 +115,19 @@ START_PRINT TOOLS=0:220,2:240 BED=60 LEVEL=1 SOAK=300
 |---|---|
 | `TOOLS=0:220,2:240` | every tool the file uses, with its clean temperature. A bare `TOOLS=0,2` also works |
 | `BED=`, `NOZZLE=`, `LAYER=` | the print's bed, nozzle and first-layer height |
-| `CLEAN=0` | skip the pre-print purge and wipe |
+| `CLEAN=0` | skip the pre-print purge and wipe; the first tool is just grabbed |
+| `PURGE=<mm>` | purge length for every tool's clean (default 50). `PURGE=0` wipes without purging |
 | `LEVEL=1` | probe a fresh mesh instead of loading the saved one |
 | `SOAK=<seconds>` | dwell after the bed reaches target. The app waited 5 minutes; the default here is 0 |
-| `DEFER_MESH=1` | stop after the clean and the soak; the file's own `ADAPTIVE_MESH` does the rest (below) |
+| `DEFER_MESH=1` | skip the Z re-home and the mesh; the file's own `ADAPTIVE_MESH` does those (below). The first tool's clean still runs |
+
+The order: the bed and every tool start heating at once — the tools to 100 °C
+below their print temperature. Then a full home; the other tools are purged,
+wiped and parked at that standby temperature while the bed heats; the bed
+wait and soak; the Z re-home and the mesh; and **last** the tool the print
+starts with is purged and wiped at print temperature and left mounted, so the
+file's first move follows straight on. That last wipe is hot, so it tears off
+a little less ooze than the cold wipe the others get.
 
 ### Mesh only where the print is
 

@@ -554,3 +554,96 @@ def test_a_tower_without_a_measured_outline_is_boxed_at_any_rotation(model):
     assert command.startswith(
         "EXCLUDE_OBJECT_DEFINE NAME=PRIME_TOWER CENTER=110.0,205.0 POLYGON=")
     assert "[[91.615" in command and "128.384" in command
+
+
+def _render_one(model, macro, params, extra=None):
+    """One macro's own lines, its sub-macros left unexpanded."""
+    cp = _parse(model)
+    printer = {}
+    for sec in cp.sections():
+        if sec.startswith("gcode_macro "):
+            variables = {}
+            for opt in cp.options(sec):
+                if opt.startswith("variable_"):
+                    try:
+                        variables[opt[9:]] = ast.literal_eval(cp.get(sec, opt))
+                    except (ValueError, SyntaxError):
+                        variables[opt[9:]] = cp.get(sec, opt)
+            printer[sec] = variables
+    printer.update(extra or {})
+    env = jinja2.Environment("{%", "%}", "{", "}")
+    info = []
+    out = env.from_string(cp.get("gcode_macro " + macro, "gcode")).render(
+        params=params, printer=printer,
+        action_respond_info=lambda m: info.append(m) or "",
+        action_raise_error=_raise)
+    return _commands(out.splitlines()), info
+
+
+def _first(out, prefix):
+    return next(i for i, c in enumerate(out) if c.startswith(prefix))
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_start_print_preheats_all_cleans_the_others_then_the_first_last(model):
+    out, _ = _render_one(model, "START_PRINT", {
+        "BED": "60", "TOOL": "2", "NOZZLE": "220", "LAYER": "0.2",
+        "TOOLS": "0:230,2:220,3:240", "PURGE": "30"})
+    preheat = _first(out, "_FF_NOZZLE_CLEAN MODE=preheat TOOLS=0,2,3")
+    others = _first(out, "_FF_NOZZLE_CLEAN TOOLS=0,3 ")
+    final = _first(out, "_FF_NOZZLE_CLEAN MODE=print TOOLS=2 ")
+    # All tools heat at once, beside the bed, before anything moves.
+    assert _first(out, "M140 S60") < preheat < _first(out, "G28")
+    # The others are cleaned while the bed heats; the first tool goes last,
+    # after the mesh, and the print offset/flow mesh follow without motion.
+    assert others < _first(out, "M190") < _first(out, "_FF_SAVED_MESH") < final
+    assert final < _first(out, "TOOLCHANGE_SET_PRINT_OFFSET") < \
+        _first(out, "_FF_FLOW_MESH_BEGIN FIRST_LAYER=0.2")
+    assert "PURGE=30.0" in out[others] and "PURGE=30.0" in out[final]
+    assert not any(c == "T2" for c in out)          # the clean grabs it
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_defer_mesh_skips_only_the_mesh_steps(model):
+    out, _ = _render_one(model, "START_PRINT", {
+        "BED": "60", "TOOL": "2", "NOZZLE": "220", "TOOLS": "0,2",
+        "DEFER_MESH": "1"})
+    assert any(c.startswith("_FF_NOZZLE_CLEAN MODE=print TOOLS=2") for c in out)
+    for skipped in ("G28 Z", "_FF_SAVED_MESH", "BED_MESH_CALIBRATE",
+                    "TOOLCHANGE_SET_PRINT_OFFSET", "_FF_FLOW_MESH_BEGIN"):
+        assert not any(c.startswith(skipped) for c in out), skipped
+
+
+def _clean_printer():
+    return {"tool T%d" % t: {"extruder": "extruder%s" % (t or "")}
+            for t in range(4)} | {"configfile": {"settings": {
+                "extruder%s" % (t or ""): {"nozzle_diameter": 0.4}
+                for t in range(4)}}}
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_preheat_only_sets_each_tool_100_below_its_temperature(model):
+    out, _ = _render_one(model, "_FF_NOZZLE_CLEAN", {
+        "MODE": "preheat", "TOOLS": "0,2", "TEMPS": "230,0,250,0",
+        "TEMP": "220"}, extra=_clean_printer())
+    assert out == ["M104 S130.0 T0", "M104 S150.0 T2"]
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("mode, cool, release", [("standby", 1, 1),
+                                                 ("print", 0, 0)])
+def test_the_print_tool_wipes_hot_and_stays_mounted(model, mode, cool,
+                                                    release):
+    out, _ = _render_one(model, "_FF_NOZZLE_CLEAN", {
+        "MODE": mode, "TOOLS": "1", "TEMP": "220"}, extra=_clean_printer())
+    assert "_FF_NOZZLE_WIPE TOOL=1 TEMP=220 COOL=%d" % cool in out
+    assert "_FF_FILAMENT_FINISH RELEASE=%d HEAT_OFF=0" % release in out
+    assert "G1 E50.0 F240" in out
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_purge_0_wipes_without_purging(model):
+    out, _ = _render_one(model, "_FF_NOZZLE_CLEAN", {
+        "TOOLS": "1", "TEMP": "220", "PURGE": "0"}, extra=_clean_printer())
+    assert not any(c.startswith("G1 E") for c in out)
+    assert any(c.startswith("_FF_NOZZLE_WIPE") for c in out)

@@ -79,6 +79,13 @@ both printer models or through every real-world workflow.
 
 ### Changed
 
+- `START_PRINT` heats every tool to 100 °C below its print temperature at
+  the start, beside the bed, then cleans the other tools while the bed heats,
+  and cleans the tool the print starts with **last**, after the mesh: purged,
+  wiped hot and left mounted, so the print starts without reheating. The
+  separate grab step is gone. `DEFER_MESH=1` now skips only the Z re-home and
+  the mesh. New `PURGE=<mm>` sets the purge length from the slicer
+  (`PURGE=0`: wipe only).
 - `START_PRINT` starts heating the bed before the first homing instead of after
   it, so the bed is closer to temperature when the nozzle clean ends.
 
