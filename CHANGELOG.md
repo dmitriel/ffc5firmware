@@ -8,20 +8,76 @@ both printer models or through every real-world workflow.
 
 ### Added
 
-- Bed-mesh probing lifts 2 mm above the previous trigger instead of back to one
-  fixed height before every point, which shortens `BED_MESH_CALIBRATE`
-  noticeably. The first move still goes to Z 5, and a calculated height under
-  Z 1 falls back to Z 3. `FF_BED_MESH_STATUS` shows the settings; they are the
-  `[ff_bed_mesh]` section of `ff-print-macros.cfg`. Contributed by
+- Flow mesh, a second bed-mesh strategy: the nozzle stays on the flat sliced
+  plane and the first layers absorb the plate's unevenness in their
+  thickness, with extrusion scaled to match. A layer is never laid thinner
+  than 0.1 mm or thicker than the nozzle diameter; past those the nozzle
+  follows the mesh just far enough, and the remainder goes into the next
+  layer, until the effective mesh is flat. `FLOW_MESH_TOGGLE ENABLE=1` uses it
+  for the next print. Off by default and not yet tested on hardware. See
+  [the flow mesh page](docs/flow-mesh.md).
+- One bed-mesh selector, `BED_MESH_MODE MODE=auto|off|fixed|adaptive|thermal`,
+  for the mesh `START_PRINT` uses: none, the saved `MESH_DATA`, a fresh mesh
+  over just the file's objects and prime tower, or the thermal map's match
+  (`MESH_DATA` without a map). The default, `auto`, uses the thermal match
+  and probes adaptive instead when there is no map or the match is more than
+  0.05 mm rms off -- so until a map is swept, every print probes adaptive.
+  A file without labelled objects gets the thermal match instead of a
+  whole-bed probe -- with no rms limit, reusing points `auto` just probed --
+  and the fixed mesh only when there is no thermal map; with no `MESH_DATA`
+  saved, the fixed mesh probes the whole bed into it once (`SAVE_CONFIG`
+  afterwards keeps it).
+  `THERMAL_MESH_APPLY` takes `MAX_RMS=` and `FALLBACK=NONE` for it.
+  `START_PRINT MESH=` overrides it for one print; `LEVEL=` is gone. The
+  adaptive mesh is now part of `START_PRINT`
+  -- `[ff_print]` defines the file's objects ahead of it -- so the slicer
+  needs no `ADAPTIVE_MESH` call, and it runs before the first tool's clean.
+  Every print says which mesh and strategy it uses. The flow mesh keeps its
+  own `FLOW_MESH_TOGGLE`.
+- Thermal mesh map: `THERMAL_MESH_SWEEP` probes full meshes at every bed and
+  chamber temperature pair in a range (serpentine order, heat-soaked, repeated
+  until two agree within a threshold) and stores them in `thermal_mesh.json`;
+  `THERMAL_MESH_ANALYZE` finds the four mesh points most sensitive to each
+  temperature; `THERMAL_MESH_APPLY` probes only those and loads a mesh
+  interpolated from the closest matches (`bilinear`, `idw`, `nearest`, or
+  `temperature` without probing). Not used unless called. See
+  [the thermal mesh page](docs/thermal-mesh.md).
+- A bed-collision guard. Klipper did not know where the bed was, so a jog, a
+  macro or a typed `G1` could drive the nozzle, or the carriage with no tool
+  on it, into the plate. Now any move that would bring them within 0.1 mm of
+  the bed is refused with a `Bed guard:` error, and nothing moves. With a tool
+  mounted the limit is G-code Z 0.1 before any babystep, so a negative
+  babystep on a 0.1 mm first layer will be refused. The bed counts as
+  X/Y -7 to 263; the dock bay, purge chute and wipe spot (X above 263) are
+  outside it. Homing, probing, the tool-offset and station calibrations, and
+  a straight Z raise are never blocked. `SET_BED_GUARD` shows the state, and
+  `SET_BED_GUARD ENABLE=0` turns it off until a restart, for a paper test.
+  The settings are the `[ff_bed_guard]` section of `ff-toolchange.cfg`. With a
+  mesh active it allows bed_mesh's own `split_delta_z` (0.025 mm) on top,
+  since bed_mesh itself lets a long line sag that far below the mesh. Not
+  yet tested on hardware.
+- Bed-mesh probing lifts only as far as the probe needs to be ready again,
+  plus 0.2 mm, between the touches at one point, and at least 1 mm
+  (`min_travel_lift`) before moving to the next, instead of back to one fixed
+  height; and travels X/Y
+  at 500 mm/s and 20000 mm/s², the fastest the carriage moves anywhere else,
+  instead of the stock 200 mm/s and 2000 mm/s². Each point is touched twice
+  rather than three times, and a third time only if the two disagree, keeping
+  whichever pair agrees; the point starts over only when none does. Other
+  probing keeps three. Z speeds and
+  acceleration are unchanged. Run
+  `FF_PROBE_RELEASE_TEST SAVE=1` then `SAVE_CONFIG` once to measure it -- for
+  the Creator 5's momentary eddy trigger, the lowest start height whose
+  touches repeat those from 3 mm; until then the lift is 2 mm. The first move still goes to Z 5,
+  and a calculated height under Z -2 falls back to Z 3. `FF_BED_MESH_STATUS`
+  shows the settings; they are the `[ff_bed_mesh]` section of
+  `ff-print-macros.cfg`. Contributed by
   [@nielssedat](https://github.com/nielssedat) in
   [#29](https://github.com/Klipper4FlashForge/firmware/pull/29).
-- `ADAPTIVE_MESH` and `DEFINE_PRIME_TOWER_OBJECT` for a slicer profile whose
-  start G-code calls them: the mesh is probed only over the objects and the
-  prime tower, the first tool is grabbed and the print offset set after it.
-  Set `variable_defer_mesh: 1` on `FF_BEFORE_PRINT_START` to have `START_PRINT`
-  leave those steps to the file. `ADAPTIVE_MESH_TOGGLE` (a Mainsail tile) turns
-  adaptive probing off to load the saved `MESH_DATA` instead. Not on by
-  default; nothing changes for a profile that does not call them.
+- `DEFINE_PRIME_TOWER_OBJECT` registers the prime tower the file actually
+  prints as an object, so an adaptive mesh covers it. (`ADAPTIVE_MESH`, which
+  a slicer profile called for this, now only reports that `START_PRINT` took
+  the mesh.)
 - `printer.ff_print` reports the active plate's prime tower: position, size,
   brim, rotation and measured outline.
 - Gentler return to the print after a tool change, for a printer that restores
@@ -35,6 +91,15 @@ both printer models or through every real-world workflow.
 
 ### Changed
 
+- `START_PRINT` heats every tool to 100 °C below its print temperature at
+  the start, beside the bed, then cleans the other tools while the bed heats,
+  and cleans the tool the print starts with **last**, after the mesh: purged,
+  wiped hot -- the purge's retract pushed back out on the pad, then a 1 s
+  rest (`clean_hot_dwell`) -- and left mounted at the print's own
+  temperature, primed, so the print starts without reheating. The
+  separate grab step is gone; the print Z offset is set just before that last
+  clean. New `PURGE=<mm>` sets the purge length from the slicer
+  (`PURGE=0`: wipe only).
 - `START_PRINT` starts heating the bed before the first homing instead of after
   it, so the bed is closer to temperature when the nozzle clean ends.
 

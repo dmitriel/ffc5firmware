@@ -69,3 +69,45 @@ prints the probed points, and HelixScreen draws the same data as a surface.
 What you are looking for is a shape that looks like a plate — a gentle bow or
 tilt — rather than one point far away from its neighbours, which usually
 means the probe was disturbed rather than the bed being that shape.
+
+---
+
+## Making probing faster (optional)
+
+Most of a mesh's time is the probe travelling down at a slow, careful speed,
+so the less it has to lift between touches the sooner it finishes. Once,
+with the plate on and the printer homed:
+
+```gcode
+G1 X125 Y125 Z5 F6000
+FF_PROBE_RELEASE_TEST SAVE=1
+SAVE_CONFIG
+```
+
+The printer touches the plate five times from 3 mm up, then again from
+lower and lower start heights, and keeps the lowest one whose touches still
+land in the same place. Between the touches at one point, every mesh after
+that lifts just that much plus 0.2 mm; moving on to the next point it always
+lifts at least 1 mm, in case the plate is higher there. `SAVE_CONFIG` restarts Klipper, so do it between
+prints. It is worth repeating after any work on the probe.
+
+---
+
+## Absorbing the mesh in the first layers instead
+
+Normally the nozzle follows the mesh, so the plate's shape is copied into
+the bottom of the part. The [flow mesh](flow-mesh.md) does the opposite: the
+nozzle stays level and the first layers are laid thicker or thinner to make
+up the difference. It is optional; `FLOW_MESH_TOGGLE ENABLE=1` turns it on
+for the next print.
+
+---
+
+## A mesh for each temperature
+
+A plate probed hot is a different shape from one probed cold, and on the
+Creator 5 Pro the chamber's temperature moves it too. If you print across a
+wide range of bed and chamber temperatures, the
+[thermal mesh map](thermal-mesh.md) can map the plate at every combination
+once and then choose the matching mesh for each print from four probe points.
+It is optional and nothing uses it unless you call it.
