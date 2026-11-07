@@ -15,11 +15,14 @@ comes out wedge-shaped instead.
 **Tilt correction** fits a plane to the mesh under the print. It then tilts
 the print's whole coordinate frame onto that plane, so the part is built
 standing square on the plate. The tilted frame is calculated once, at the
-print start, and frozen for the whole print. Bed mesh then corrects only
-what the plane does not explain, the *residual*. Mesh fade and the
-[flow mesh](flow-mesh.md) both work with it, and both act on that residual
-alone: neither of them, nor a mesh cleared or reloaded mid-print, can
-change the tilted frame.
+print start, and frozen for the whole print.
+
+The frame applies to the bed mesh too. The bed mesh, mesh fade and the
+[flow mesh](flow-mesh.md) all work inside the tilted frame, and their
+corrections are rotated with it. The mesh correction goes along the plate's
+normal, not straight up, and fade follows the print's own height. Nothing
+that changes the mesh, including a mesh cleared or reloaded mid-print, can
+change the frame.
 
 ```gcode
 TILT_CORRECTION_TOGGLE ENABLE=1     ; prints use it, until a restart
@@ -45,11 +48,12 @@ or when the file has no first layer to fit to. `END_PRINT` and a cancel
 turn the correction off and put the measured mesh back.
 
 **With the flow mesh**, the frame takes the plate's tilt and the first
-layers absorb the residual: the nozzle stays on the tilted plane, and the
-first layers are laid thicker over low spots and thinner over high ones
-relative to that plane. **With mesh fade**, the residual fades out with
-height and the tilted frame stays to the top of the print. Fade then works
-from the height of the plane under the nozzle, not from machine Z = 0.
+layers absorb the rest: the nozzle stays on the tilted plane, and the first
+layers are laid thicker over low spots and thinner over high ones relative
+to that plane. **With mesh fade**, the mesh fades out with the print's
+height and the tilted frame stays to the top of the print. A layer fades by
+the same amount everywhere on the bed, because fade measures height in the
+tilted frame.
 
 The toggle resets to off on every restart. To make tilt correction the
 default, add this at the end of `printer.cfg`:
@@ -77,7 +81,8 @@ variable_enabled: 1
    file already goes, the tilt is reduced.
 4. **Freeze and apply.** The map is computed this once and stored, and is
    readable as `printer.ff_tilt_correction.transform`. From here on
-   `bed_mesh` holds the measured mesh less the frozen plane.
+   `bed_mesh` holds the plate expressed in the tilted frame, and everything
+   it outputs goes through the map.
 
 The rest of this page is the math behind steps 2 to 4.
 
@@ -175,48 +180,62 @@ print's origin (x₀, y₀, 0) lands on the plane at height **z₀**. That is th
 Z offset of the new frame: the mean mesh height over the footprint. The
 print's Z axis follows **n**.
 
-### 3. Freezing the frame, and the residual
+### 3. Freezing the frame, and applying it to the bed mesh
 
-The frame is the map **p** → **q**, and the correction sends **q** down
-Klipper's chain of move transforms as it is. The tilt and the Z offset z₀
-belong to the frame alone. From the moment the map is computed it is
-fixed: nothing reads the mesh to rebuild it.
+The map **p** → **q** is fixed from the moment it is computed. Nothing reads
+the mesh to rebuild it.
 
-Bed mesh sits below the correction and adds its mesh to every move. If it
-still held the measured mesh *m(x, y)*, it would add the plane a second
-time. So while the correction is on, bed mesh holds the **residual**:
+Klipper's moves pass through a chain of stages. Each G-code move goes
+through the flow mesh (if on), then the tool's offsets, then the bed mesh,
+and finally reaches the toolhead. The tilt is applied **last**, between the
+bed mesh and the toolhead. Every stage above it, the bed mesh included,
+therefore works in the tilted frame. The tilt then rotates the result,
+including the bed mesh's correction:
 
-  r(x, y) = m(x, y) − plane(x, y)
+* the bed mesh is looked up at the frame's (u, v) and added along the
+  frame's Z, which is the plate's normal **n**;
+* fade is a function of the frame's height, so a layer fades by the same
+  fraction everywhere on the bed;
+* the flow mesh tracks layers in the file's own Z and absorbs the mesh in
+  the frame.
 
-It is computed node by node on bed mesh's own interpolated grid, so between
-the nodes it is still exactly *m − plane*. The nozzle then lands at
+For that, the bed mesh has to hold the plate *in the frame*: at frame
+point (u, v), the plate's height above the fitted plane, measured along
+**n**. Let Q₀ = **q**(u, v, 0) be the frame point on the plane, and
+r = m − plane the measured mesh above the plane. The plate is where the
+line Q₀ + w**n** meets it, which works out to
 
-  **q** + r(qₓ, q_y)
+  w = r(Q₀ₓ + w·nₓ, Q₀_y + w·n_y) / s
 
-On the first layer that is the measured plate plus one layer height, as
-with standard bed mesh. Above it, the part stands square on the plane.
+That is a fixed point, because w appears on both sides. Two iterations from
+w = 0 close it far below a micron, because the plate's slope relative to
+the plane is tiny. A point *h* up in the frame lands at
 
-Everything that shapes the *effective* mesh then works on *r* alone:
+  Q₀ + (h + w) **n**
 
-* **Fade** scales what bed mesh adds by a factor that falls from 1 to 0
-  between `fade_start` and `fade_end`. It adds
-  *f·(r − t) + t*, with *t* the fade target (by default the average of *r*).
-  The residual fades out; **q** does not.
-* **The flow mesh** sits above the correction, in the print's own frame. Its
-  layer tracking sees the file's Z, and it absorbs *r* instead of following
-  it. It looks *r* up at (qₓ, q_y), where the leaning nozzle really is, not
-  at the file's X/Y.
-* **A mesh loaded mid-print** (`BED_MESH_PROFILE LOAD`, a new calibration)
-  is turned into its residual against the same frozen plane on the way in.
-  `BED_MESH_CLEAR` removes the residual and leaves the frame tilted.
+which is exactly *h* from the plate, measured along the normal. For
+h = 0, the file's Z0, it is on the measured plate.
+
+Fade scales the mesh by a factor *f* that falls from 1 to 0 between
+`fade_start` and `fade_end`. It adds *f·(w − t) + t*, with *t* the fade
+target (by default the average of *w*). That height is in the frame, along
+**n**; above `fade_end` only *t* is left, and the frame is still tilted.
+
+A mesh loaded mid-print (`BED_MESH_PROFILE LOAD`, a new calibration) is
+re-expressed in the same frozen frame on its way in. `BED_MESH_CLEAR`
+removes the mesh and leaves the frame tilted.
 
 The probed points bed mesh keeps, which are what `BED_MESH_PROFILE SAVE`
 writes, stay the measured ones. Saving a profile mid-print saves the plate,
-not the residual. The screens show the residual as the mesh while a tilted
-print runs; `END_PRINT` puts the measured mesh back.
+not its frame version. The screens show the frame version as the mesh while
+a tilted print runs; `END_PRINT` puts the measured mesh back.
 
-The bed guard has to know where the plate really is, so it reads the
-measured mesh behind the residual.
+The tool's Z offset (the ~3.2 mm nozzle gap plus the print-start job term)
+sits above the bed mesh, but it is not part of the print. The final stage
+takes it off before rotating and puts it back afterwards, so only the
+print's own height leans. Dock moves run without a tool frame and pass
+through unrotated. The bed guard checks every move in machine coordinates
+against the measured plate.
 
 How tall a layer is: *R* maps the plane z = 0 onto the fitted plane, so a
 point *h* along the normal sits
@@ -255,11 +274,11 @@ against an envelope: `envelope_min`/`envelope_max`, by default each axis'
 
 The map is affine. So the image of a box lies within the images of its eight
 corners, and checking the corners is enough. Each corner goes through the
-map into toolhead coordinates. Z already includes the plane, which now
-rides in the frame. For Z the check adds what the chain below adds: the
-tools' Z offsets, the job term, and the residual's lowest and highest value
-against the plane being tried. 0 is included, because fade can take the
-residual away. Slab-sized boxes keep this tight: a corner low on the part is never
+map into toolhead coordinates. The bed mesh is part of the frame now, so
+its lowest and highest value against the plane being tried (0 included,
+because fade can take the mesh away) widens each box's Z *before* the map.
+It leans with the part, and moves X/Y too. The tools' Z offsets and the
+job term are added after the map, in machine Z. Slab-sized boxes keep this tight: a corner low on the part is never
 checked at the height of the part's top.
 
 The tilt is then scaled by a factor σ ∈ [0, 1]. The slope becomes σ**g**,
@@ -271,8 +290,8 @@ sliced, the correction is never blamed for it. It is only stopped from
 making things worse.
 
 A reduced σ costs nothing on the first layer. The frozen plane is the
-reduced one, so the part of the tilt that is dropped stays in the residual,
-and bed mesh follows it as before. Only the
+reduced one, so the part of the tilt that is dropped stays in the frame's
+mesh, and bed mesh follows it as before. Only the
 lean is reduced. A slope steeper than `max_slope` (1 mm per 100 mm) is
 almost certainly a bad mesh rather than a tilted plate, and it is capped
 there.
@@ -281,9 +300,10 @@ there.
 
 ## Things to know
 
-* **It corrects the frame; bed mesh keeps the rest.** Your first layer
-  behaves exactly as before: on the plate, plus the flow mesh's thickness
-  changes if that is on.
+* **The frame applies to the bed mesh too.** The first layer still lands on
+  the measured plate; the mesh correction is just measured along the
+  plate's normal. The flow mesh's thickness changes come on top of that if
+  it is on.
 * **The frame is frozen at the print start.** Nothing that changes the mesh
   later changes it. `TILT_CORRECTION_STATUS` shows it, and
   `TILT_CORRECTION_STOP` ends it.
@@ -293,9 +313,9 @@ there.
   `START_PRINT` waits for it, up to `scan_timeout`.
 * **Tool changes**: each tool's moves are placed using that tool's offset.
   Dock moves run in the raw machine frame and are untouched.
-* **Mesh fade** heights are machine heights: the tool's ~3.2 mm frame
-  offset, and now the plane's height under the nozzle, are included in
-  them, as they always were for the tool offset.
+* **Mesh fade** heights are measured in the tilted frame. They include the
+  tool's ~3.2 mm offset, as they always have on this printer, but not the
+  plane's height.
 
 ---
 

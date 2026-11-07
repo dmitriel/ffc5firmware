@@ -291,19 +291,25 @@ def test_max_slope_caps_the_tilt(tc):
     assert scale == pytest.approx(0.2)
 
 
-def test_z_counts_the_frame_and_what_the_chain_below_adds(tc):
+def test_z_counts_the_frame_and_what_the_chain_adds(tc):
     boxes = [(50., 200., 50., 200., 0., 265.)]
     excess = tc.envelope_excess(tc.scaled_map(fit_of(0., 0., z0=0.2), 0.),
                                 boxes, ENV_MIN, ENV_MAX, 3., 3.4)
-    # z0 rides in the frame now; tool offset + residual from below.
+    # z0 rides in the frame; the tool's Z offset is added after the map.
     assert excess[('Z', 1)][0] == pytest.approx(265. + 0.2 + 3.4 - 270.)
+    # The mesh's own height goes in BEFORE the map: it leans with the
+    # frame, so it moves X too.
+    lean = tc.scaled_map(fit_of(-0.01, 0.), 1.)
+    flat = tc.envelope_excess(lean, boxes, ENV_MIN, ENV_MAX)
+    raised = tc.envelope_excess(lean, boxes, ENV_MIN, ENV_MAX, w_high=5.)
+    assert raised[('X', 1)][0] > flat[('X', 1)][0] + 0.04
     seen = []
     tc.choose_scale(fit_of(0.001, 0.), boxes, ENV_MIN, ENV_MAX,
                     z_extra=lambda s: seen.append(s) or (0., 0.))
     assert 0. in seen and 1. in seen
 
 
-# -- the residual mesh ---------------------------------------------------------
+# -- the mesh in the frame -----------------------------------------------------
 
 class Mesh:
     """A ZMesh: a 6x6 probe interpolated to 26x26 nodes, bilinear calc_z."""
@@ -357,40 +363,64 @@ def bumpy(x, y):
         * math.cos(y / 55.)
 
 
-def test_the_residual_is_the_measured_mesh_less_the_frozen_plane(tc):
+
+
+def test_the_frame_mesh_is_the_plate_along_the_normal(tc):
     plate = Mesh(bumpy)
     t = tc.TiltMap(120., 130., 0.2, 0.002, -0.001)
-    res = tc.ResidualMesh(plate, t)
-    for x, y in ((0., 0.), (17.3, 222.2), (130., 140.), (250., 250.),
-                 (-20., 300.)):
-        assert res.calc_z(x, y) == pytest.approx(
-            plate.calc_z(x, y) - t.plane(x, y), abs=1e-12)
-    # Node by node on the same grid: bilinear calc_z of the residual matrix
-    # is the residual everywhere inside, not just at the nodes.
-    check = Mesh(lambda x, y: 0.)
-    check.mesh_matrix = res.get_mesh_matrix()
-    for x, y in ((17.3, 222.2), (101., 3.)):
-        assert check.calc_z(x, y) == pytest.approx(res.calc_z(x, y),
-                                                   abs=1e-6)
-    lo, hi = res.get_z_range()
+    fm = tc.FrameMesh(plate, t)
+    nx, ny, nz = t.normal
+    for u, v in ((5., 5.), (17.3, 222.2), (130., 140.), (245., 245.)):
+        w = fm.calc_z(u, v)
+        q0 = t.forward(u, v, 0.)
+        # Up the frame's Z (the normal) by w from the plane: on the plate.
+        x, y, z = q0[0] + w * nx, q0[1] + w * ny, q0[2] + w * nz
+        assert z == pytest.approx(plate.calc_z(x, y), abs=1e-8)
+    # The frame matrix is calc_z at bed_mesh's own nodes.
+    assert fm.get_mesh_matrix()[3][7] == pytest.approx(
+        fm.calc_z(7 * plate.step, 3 * plate.step), abs=1e-6)
+    lo, hi = fm.get_z_range()
     assert hi - lo < plate.get_z_range()[1] - plate.get_z_range()[0]
     # What bed_mesh saves as a profile stays the measured probe.
-    assert res.get_probed_matrix() == plate.get_probed_matrix()
-    assert res.get_profile_name() == "MESH_DATA"
-    assert tc.plate_of(res) is plate and tc.plate_of(plate) is plate
+    assert fm.get_probed_matrix() == plate.get_probed_matrix()
+    assert fm.get_profile_name() == "MESH_DATA"
+    assert tc.plate_of(fm) is plate and tc.plate_of(plate) is plate
 
 
-# -- the transform, against a fake klippy -------------------------------------
+def test_a_plate_that_is_its_plane_is_flat_in_the_frame(tc):
+    t = tc.TiltMap(100., 100., 0.15, 0.003, 0.002)
+    fm = tc.FrameMesh(Mesh(lambda x, y: t.plane(x, y)), t)
+    for u, v in ((10., 10.), (100., 200.), (240., 30.)):
+        assert fm.calc_z(u, v) == pytest.approx(0., abs=1e-12)
+
+
+# -- the stage, against a fake klippy ---------------------------------------------
+
+class Toolhead:
+    def __init__(self):
+        self.pos = [0., 0., 10., 0.]
+        self.moves = []
+        self.max_accel = 20000.
+
+    def move(self, newpos, speed):
+        self.moves.append(list(newpos))
+        self.pos = list(newpos)
+
+    def get_position(self):
+        return list(self.pos)
+
 
 class BedMesh:
-    """Klipper's bed_mesh as far as this module touches it, with fade."""
+    """Klipper's bed_mesh as far as this touches it: its own `toolhead`,
+    fade by the Z it is given, set_mesh resetting the G-code position."""
     FADE_DISABLE = 0x7FFFFFFF
 
-    def __init__(self, gcode_move, mesh, fade=None):
+    def __init__(self, gcode_move, toolhead, mesh, fade=None):
         self.gcode_move = gcode_move
-        self.z_mesh = None
+        self.toolhead = toolhead
         self.fade_start, self.fade_end = fade or (1., self.FADE_DISABLE)
         self.fade_target = 0.
+        self.z_mesh = None
         self.set_mesh(mesh)
 
     def set_mesh(self, mesh):
@@ -402,46 +432,65 @@ class BedMesh:
     def get_mesh(self):
         return self.z_mesh
 
-    def added(self, x, y, z):
-        """What bed_mesh adds to a move at (x, y, z)."""
-        if self.z_mesh is None:
-            return 0.
+    def factor(self, z):
         if z >= self.fade_end:
-            factor = 0.
-        elif z >= self.fade_start:
-            factor = (self.fade_end - z) / (self.fade_end - self.fade_start)
-        else:
-            factor = 1.
+            return 0.
+        if z >= self.fade_start:
+            return (self.fade_end - z) / (self.fade_end - self.fade_start)
+        return 1.
+
+    def added(self, x, y, z):
+        if self.z_mesh is None:
+            return self.fade_target
         ft = self.fade_target
-        return factor * (self.z_mesh.calc_z(x, y) - ft) + ft
-
-
-class Next:
-    """ff_toolchange's frame and everything under it: records moves."""
-
-    def __init__(self):
-        self.pos = [0., 0., 10., 0.]
-        self.moves = []
+        return self.factor(z) * (self.z_mesh.calc_z(x, y) - ft) + ft
 
     def move(self, newpos, speed):
-        self.moves.append(list(newpos))
-        self.pos = list(newpos)
+        x, y, z = newpos[:3]
+        self.toolhead.move([x, y, z + self.added(x, y, z)] + newpos[3:],
+                           speed)
 
     def get_position(self):
-        return list(self.pos)
+        x, y, z = self.toolhead.get_position()[:3]
+        # Exact while unfaded, which is all the tests read back.
+        return [x, y, z - self.added(x, y, 0.),
+                self.toolhead.get_position()[3]]
 
 
-class Above:
-    """exclude_object or the flow mesh, above the tool frame."""
+class ToolFrame:
+    """ff_toolchange's per-tool frame: adds the tool offsets, Z with the
+    job term, and hands down to bed_mesh."""
 
-    def __init__(self, below):
-        self.next_transform = below
+    def __init__(self, printer, offsets, job_z):
+        self.printer = printer
+        self.offsets = offsets
+        self.job_z = job_z
+        self.tool = 0
+        self.next_transform = None
+
+    def _offsets(self):
+        if self.tool is None:
+            return None
+        ox, oy, oz = self.offsets[self.tool]
+        return ox, oy, oz + self.job_z
+
+    def move(self, newpos, speed):
+        o = self._offsets() or (0., 0., 0.)
+        self.next_transform.move([newpos[0] + o[0], newpos[1] + o[1],
+                                  newpos[2] + o[2]] + list(newpos[3:]),
+                                 speed)
+
+    def get_position(self):
+        o = self._offsets() or (0., 0., 0.)
+        p = self.next_transform.get_position()
+        return [p[0] - o[0], p[1] - o[1], p[2] - o[2]] + p[3:]
 
 
 class GcodeMove:
-    def __init__(self, below):
-        self.move_transform = below
+    def __init__(self):
+        self.move_transform = None
         self.homing_position = [0., 0., 0., 0.]
+        self.base_position = [0., 0., 0., 0.]
         self.resets = 0
 
     def set_move_transform(self, transform, force=False):
@@ -469,34 +518,37 @@ class Gcode:
         self.info.append(msg)
 
 
+OFFSETS = ((0., 0., 3.2), (7., -3., 3.1), (0., 0., 3.2), (0., 0., 3.2))
+JOB_Z = 0.05
+
+
 class Printer:
     command_error = CommandError
 
-    def __init__(self, mesh_z, tool=0, offsets=((0., 0., 3.2),) * 4,
-                 fade=None, filename=None):
+    def __init__(self, mesh_z, tool=0, fade=None, filename=None):
         self.gcode = Gcode()
-        self.next = Next()
-        self.gcode_move = GcodeMove(self.next)
-        self.frame = SimpleNamespace(tool=tool)
-        toolchange = SimpleNamespace(
-            offset_x=[o[0] for o in offsets],
-            offset_y=[o[1] for o in offsets],
-            offset_z=[o[2] for o in offsets], job_z=0.05)
-        # The tool frame IS what Next stands for: the tilt links above it.
-        self.next._offsets = lambda: None if self.frame.tool is None else (
-            offsets[self.frame.tool][0], offsets[self.frame.tool][1],
-            offsets[self.frame.tool][2])
-        self.next.tool = None
-        toolchange.gcode_transform = self.next
-        toolchange._current_tool_or_none = lambda: (self.frame.tool, '')
-        self.bed_mesh = BedMesh(self.gcode_move,
+        self.toolhead = Toolhead()
+        self.gcode_move = GcodeMove()
+        self.frame = ToolFrame(self, OFFSETS, JOB_Z)
+        self.frame.tool = tool
+        self.gcode_move.move_transform = self.frame
+        self.bed_mesh = BedMesh(self.gcode_move, self.toolhead,
                                 Mesh(mesh_z) if mesh_z else None, fade)
+        self.frame.next_transform = self.bed_mesh
+        toolchange = SimpleNamespace(
+            offset_x=[o[0] for o in OFFSETS],
+            offset_y=[o[1] for o in OFFSETS],
+            offset_z=[o[2] for o in OFFSETS], job_z=JOB_Z,
+            gcode_transform=self.frame,
+            _current_tool_or_none=lambda: (self.frame.tool, ''))
         self.objects = {
             "gcode": self.gcode,
             "gcode_move": self.gcode_move,
             "bed_mesh": self.bed_mesh,
             "ff_toolchange": toolchange,
             "ff_print": SimpleNamespace(filename=filename),
+            "toolhead": SimpleNamespace(get_extruder=lambda: SimpleNamespace(
+                nozzle_diameter=0.4)),
         }
 
     def get_reactor(self):
@@ -505,12 +557,10 @@ class Printer:
     def lookup_object(self, name, default=None):
         return self.objects.get(name, default)
 
-    def nozzle(self, tool_xy=(0., 0.)):
-        """Where the last move put the nozzle, in toolhead X/Y and height
-        above the homed plane (the tool's own Z offset left out)."""
-        x, y, z = self.next.moves[-1][:3]
-        bx, by = x + tool_xy[0], y + tool_xy[1]
-        return bx, by, z + self.bed_mesh.added(bx, by, z)
+    def gmove(self, x, y, z, e=0.):
+        """A G-code move, down the whole chain."""
+        self.gcode_move.move_transform.move([x, y, z, e], 100.)
+        return self.toolhead.moves[-1]
 
 
 class Section:
@@ -592,6 +642,14 @@ def tilted(x, y):
     return 0.1 + 0.002 * x - 0.001 * y
 
 
+OZ = OFFSETS[0][2] + JOB_Z
+
+
+def nozzle(machine, oz=OZ):
+    """Toolhead point -> nozzle, height above the homed plane."""
+    return machine[0], machine[1], machine[2] - oz
+
+
 def test_the_envelope_defaults_to_the_steppers(tc):
     obj = tc.FFTiltCorrection(Config(Printer(None)))
     assert obj.env_min == (-5., -5., -10.)
@@ -601,7 +659,6 @@ def test_the_envelope_defaults_to_the_steppers(tc):
 def test_start_fits_the_measured_mesh_under_the_footprint(tc, tmp_path):
     obj, printer, cmd = started(tc, tmp_path, tilted)
     assert obj.active
-    assert printer.gcode_move.move_transform is obj
     t = obj.tilt
     assert t.gx == pytest.approx(0.002, abs=1e-9)
     assert t.gy == pytest.approx(-0.001, abs=1e-9)
@@ -615,89 +672,80 @@ def test_start_fits_the_measured_mesh_under_the_footprint(tc, tmp_path):
     assert len(status['transform']['rotation']) == 3
 
 
-def test_bed_mesh_holds_the_residual_and_the_nozzle_meets_the_plate(
+def test_it_sits_under_bed_mesh_and_leaves_the_gcode_chain_alone(
         tc, tmp_path):
     obj, printer, _ = started(tc, tmp_path, bumpy)
+    assert printer.gcode_move.move_transform is printer.frame
+    assert printer.bed_mesh.toolhead is obj.stage
+    assert obj.stage.toolhead is printer.toolhead
+    assert obj.stage.max_accel == 20000.         # the rest is the toolhead's
+    assert isinstance(printer.bed_mesh.get_mesh(), tc.FrameMesh)
+
+
+def test_the_bed_mesh_is_applied_in_the_tilted_frame(tc, tmp_path):
+    obj, printer, _ = started(tc, tmp_path, bumpy)
+    t = obj.tilt
+    plate = printer.bed_mesh.get_mesh().plate
+    for u, v in ((50., 70.), (190., 180.), (120., 130.), (20., 240.)):
+        # Z0 in the file: the nozzle lands ON the measured plate...
+        on = nozzle(printer.gmove(u, v, 0.))
+        assert on[2] == pytest.approx(plate.calc_z(on[0], on[1]), abs=1e-7)
+        # ...and a layer up is 0.2 from it ALONG THE NORMAL, not along Z:
+        # the mesh correction is rotated with the frame.
+        up = nozzle(printer.gmove(u, v, 0.2))
+        step = [b - a for a, b in zip(on, up)]
+        assert step == pytest.approx([0.2 * n for n in t.normal], abs=1e-9)
+        # Back through the stage: bed_mesh's own frame, mesh on frame Z.
+        frame = obj.to_frame(printer.toolhead.moves[-1])
+        w = printer.bed_mesh.get_mesh().calc_z(u, v)
+        assert frame[:3] == pytest.approx([u, v, 0.2 + OZ + w], abs=1e-9)
+
+
+def test_fade_runs_on_the_frames_height(tc, tmp_path):
+    obj, printer, _ = started(tc, tmp_path, bumpy, fade=(1., 10.))
     mesh = printer.bed_mesh.get_mesh()
-    assert isinstance(mesh, tc.ResidualMesh)
-    for x, y in ((50., 70.), (190., 180.), (120., 130.)):
-        p = obj.get_position()
-        obj.move([x, y, 0.2, p[3]], 100.)
-        bx, by, z = printer.nozzle()
-        # On the measured plate, one layer up (along the normal).
-        assert z == pytest.approx(mesh.plate.calc_z(bx, by)
-                                  + obj.tilt.s * 0.2, abs=1e-9)
-
-
-def test_moves_go_down_tilted_and_come_back_exact(tc, tmp_path):
-    obj, printer, _ = started(tc, tmp_path, tilted)
-    obj.move([150., 100., 80., 5.], 100.)
-    down = printer.next.moves[-1]
-    assert down[3] == 5.
-    assert down[:3] == pytest.approx(list(obj.tilt.forward(150., 100., 80.)))
-    assert obj.get_position() == pytest.approx([150., 100., 80., 5.])
+    ft = printer.bed_mesh.fade_target
+    assert ft == mesh.get_z_average()
+    # Mid-fade, one print height: the SAME fraction of the frame mesh at
+    # both ends of the bed, though the plane is at different heights there.
+    h = 5.
+    f = printer.bed_mesh.factor(h + OZ)
+    assert 0. < f < 1.
+    for u, v in ((30., 40.), (230., 220.)):
+        printer.gmove(u, v, h)
+        added = obj.to_frame(printer.toolhead.moves[-1])[2] - (h + OZ)
+        assert added == pytest.approx(f * (mesh.calc_z(u, v) - ft) + ft,
+                                      abs=1e-9)
+    # Above fade_end: the mesh is gone, the frame is still tilted.
+    m = printer.gmove(150., 100., 80.)
+    q = obj.tilt.forward(150., 100., 80. + ft)
+    assert nozzle(m) == pytest.approx(q, abs=1e-9)
+    assert m[0] == pytest.approx(150. - obj.tilt.gx * 80., abs=1e-3)
 
 
 def test_the_frame_is_frozen_whatever_happens_to_the_mesh(tc, tmp_path):
     obj, printer, _ = started(tc, tmp_path, bumpy)
     frozen = obj.tilt.describe()
-    obj.move([150., 100., 80., 0.], 100.)
-    before = printer.next.moves[-1]
-    # A different mesh loaded mid-print: rebased on the SAME plane.
-    printer.bed_mesh.set_mesh(Mesh(lambda x, y: 0.5 - 0.003 * x))
+    # A different mesh loaded mid-print: put in the SAME frozen frame.
+    other = Mesh(lambda x, y: 0.5 - 0.003 * x)
+    printer.bed_mesh.set_mesh(other)
     loaded = printer.bed_mesh.get_mesh()
-    assert isinstance(loaded, tc.ResidualMesh) and loaded.tilt is obj.tilt
-    assert loaded.calc_z(30., 40.) == pytest.approx(
-        0.5 - 0.09 - obj.tilt.plane(30., 40.))
-    # BED_MESH_CLEAR: no residual, the frame stays.
+    assert isinstance(loaded, tc.FrameMesh) and loaded.tilt is obj.tilt
+    assert loaded.plate is other
+    # BED_MESH_CLEAR: no mesh, the frame stays.
     printer.bed_mesh.set_mesh(None)
     assert printer.bed_mesh.get_mesh() is None
-    obj.move([150., 100., 80., 0.], 100.)
-    assert printer.next.moves[-1] == before
+    m = printer.gmove(150., 100., 80.)
+    assert nozzle(m) == pytest.approx(obj.tilt.forward(150., 100., 80.))
     assert obj.tilt.describe() == frozen
 
 
-def test_with_fade_the_residual_fades_and_the_frame_stays(tc, tmp_path):
-    obj, printer, _ = started(tc, tmp_path, bumpy, fade=(1., 10.))
-    residual = printer.bed_mesh.get_mesh()
-    target = printer.bed_mesh.fade_target
-    assert target == residual.get_z_average()
-    # Above fade_end only fade_target is added: the nozzle is on the frozen
-    # tilted frame, leaning, not back on machine Z.
-    obj.move([150., 100., 80., 0.], 100.)
-    bx, by, z = printer.nozzle()
-    q = obj.tilt.forward(150., 100., 80.)
-    assert (bx, by) == pytest.approx(q[:2])
-    assert z == pytest.approx(q[2] + target)
-    assert bx == pytest.approx(150. - obj.tilt.gx * 80., abs=1e-3)
-    # At the first layer the residual is fully applied: on the plate.
-    obj.move([150., 100., 0.2, 0.], 100.)
-    bx, by, z = printer.nozzle()
-    assert z == pytest.approx(residual.plate.calc_z(bx, by)
-                              + obj.tilt.s * 0.2, abs=1e-9)
-
-
-def test_it_links_under_the_flow_mesh_and_exclude_object(tc, tmp_path):
-    obj, printer = make(tc, tmp_path, bumpy)
-    flow = Above(printer.next)
-    exclude = Above(flow)
-    printer.gcode_move.move_transform = exclude
-    obj.cmd_TILT_CORRECTION_START(Cmd())
-    assert flow.next_transform is obj and obj.next_transform is printer.next
-    assert printer.gcode_move.move_transform is exclude
-    assert obj.stop()
-    assert flow.next_transform is printer.next
-
-
-def test_the_flow_mesh_absorbs_the_residual_under_the_lean(tc, tmp_path):
+def test_the_flow_mesh_absorbs_the_plate_in_the_frame(tc, tmp_path):
     spec = importlib.util.spec_from_file_location(
         "test_ff_flow_for_tilt", MODULE.parent / "ff_flow_mesh.py")
     fm = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(fm)
-    obj, printer = make(tc, tmp_path, bumpy)
-    obj.cmd_TILT_CORRECTION_START(Cmd())
-    printer.objects["toolhead"] = SimpleNamespace(
-        get_extruder=lambda: SimpleNamespace(nozzle_diameter=0.4))
+    obj, printer, _ = started(tc, tmp_path, bumpy)
     flow = fm.FFFlowMesh(SimpleNamespace(
         get_printer=lambda: printer,
         getfloat=lambda o, d=None, **k: {'min_thickness': 0.1,
@@ -705,60 +753,61 @@ def test_the_flow_mesh_absorbs_the_residual_under_the_lean(tc, tmp_path):
     printer.objects["ff_flow_mesh"] = flow
     flow.start(0.1, None, 0.2)
     assert printer.gcode_move.move_transform is flow
-    assert flow.next_transform is obj
-    # First layer: the nozzle on the frozen tilted plane, flat -- the
-    # residual is absorbed in the layer's thickness, not followed.
     flow.move([60., 100., 0.2, 0.], 100.)
     flow.move([180., 100., 0.2, 1.], 100.)
-    residual = printer.bed_mesh.get_mesh()
-    for move in printer.next.moves[-5:]:
-        x, y, z = move[:3]
-        assert z + residual.calc_z(x, y) == pytest.approx(
-            obj.tilt.plane(x, y) + obj.tilt.s * 0.2, abs=2e-4)
-    # Its own lookup is where the leaning nozzle lands.
-    assert flow._bed_xy(100., 100., 50.) == pytest.approx(
-        obj.tilt.forward(100., 100., 50.)[:2])
+    # The first layer's nozzle is flat ON THE TILTED PLANE: frame height
+    # exactly 0.2 at every split, the plate absorbed in the layer.
+    for m in printer.toolhead.moves[-60:]:
+        assert obj.to_frame(m)[2] - OZ == pytest.approx(0.2, abs=1e-9)
 
 
-def test_the_tools_offset_places_the_plane(tc, tmp_path):
-    offsets = ((0., 0., 3.2), (7., -3., 3.1), (0., 0., 3.2), (0., 0., 3.2))
-    obj, printer, _ = started(tc, tmp_path, tilted, tool=1, offsets=offsets)
-    obj.move([150., 100., 80., 0.], 100.)
-    expected = obj.tilt.forward(157., 97., 80.)
-    assert printer.next.moves[-1][:3] == pytest.approx(
-        [expected[0] - 7., expected[1] + 3., expected[2]])
-    assert obj.get_position()[:3] == pytest.approx([150., 100., 80.])
+def test_the_tools_offsets_ride_outside_the_rotation(tc, tmp_path):
+    obj, printer, _ = started(tc, tmp_path, tilted, tool=1)
+    oz = OFFSETS[1][2] + JOB_Z
+    m = printer.gmove(150., 100., 80.)
+    w = printer.bed_mesh.get_mesh().calc_z(157., 97.)
+    assert nozzle(m, oz) == pytest.approx(
+        obj.tilt.forward(157., 97., 80. + w), abs=1e-9)
+    assert printer.frame.get_position()[:3] == pytest.approx(
+        [150., 100., 80.], abs=1e-6)
 
 
 def test_dock_moves_in_the_raw_frame_pass_through(tc, tmp_path):
     obj, printer, _ = started(tc, tmp_path, tilted)
     printer.frame.tool = None
-    obj.move([280., 50., 30., 0.], 100.)
-    assert printer.next.moves[-1] == [280., 50., 30., 0.]
-    assert obj.get_position() == [280., 50., 30., 0.]
+    assert obj.stage.move([280., 50., 30., 0.], 100.) is None
+    assert printer.toolhead.moves[-1] == [280., 50., 30., 0.]
+    assert obj.stage.get_position() == printer.toolhead.get_position()
 
 
-def test_stop_puts_the_measured_mesh_back(tc, tmp_path):
+def test_stop_puts_the_toolhead_and_the_measured_mesh_back(tc, tmp_path):
     obj, printer, _ = started(tc, tmp_path, bumpy)
     plate = printer.bed_mesh.get_mesh().plate
-    above = Above(obj)
-    printer.gcode_move.move_transform = above
     assert obj.stop()
-    assert above.next_transform is printer.next
+    assert printer.bed_mesh.toolhead is printer.toolhead
     assert printer.bed_mesh.get_mesh() is plate
     assert 'set_mesh' not in vars(printer.bed_mesh)
     assert not obj.active and not obj.stop()
+    m = printer.gmove(150., 100., 80.)
+    assert m[:2] == [150., 100.]
 
 
-def test_a_restart_refits_the_plate_not_the_residual(tc, tmp_path):
+def test_stop_refuses_if_the_stage_was_displaced(tc, tmp_path):
+    obj, printer, _ = started(tc, tmp_path, bumpy)
+    printer.bed_mesh.toolhead = Toolhead()
+    with pytest.raises(CommandError, match="replaced"):
+        obj.stop()
+
+
+def test_a_restart_refits_the_plate_not_the_frame_mesh(tc, tmp_path):
     obj, printer, _ = started(tc, tmp_path, tilted)
     first = obj.tilt.describe()
     obj.cmd_TILT_CORRECTION_START(Cmd())
     again = obj.tilt.describe()
     for key in ('x0', 'y0', 'z0', 'gx', 'gy'):
         assert again[key] == pytest.approx(first[key])
-    assert printer.bed_mesh.get_mesh().plate.calc_z(10., 10.) == \
-        pytest.approx(tilted(10., 10.))
+    assert printer.bed_mesh.toolhead is obj.stage
+    assert obj.stage.toolhead is printer.toolhead     # not stacked twice
 
 
 def test_dry_run_reports_without_applying(tc, tmp_path):
@@ -766,7 +815,8 @@ def test_dry_run_reports_without_applying(tc, tmp_path):
     cmd = Cmd(DRY_RUN=1)
     obj.cmd_TILT_CORRECTION_START(cmd)
     assert not obj.active
-    assert not isinstance(printer.bed_mesh.get_mesh(), tc.ResidualMesh)
+    assert printer.bed_mesh.toolhead is printer.toolhead
+    assert not isinstance(printer.bed_mesh.get_mesh(), tc.FrameMesh)
     assert "DRY_RUN" in cmd.info[0]
 
 

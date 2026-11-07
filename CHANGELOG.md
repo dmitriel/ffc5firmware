@@ -14,10 +14,11 @@ both printer models or through every real-world workflow.
   the background, fits a plane to the active mesh over the first-layer
   footprint (least squares, equal weight per area), tilts the frame about the
   footprint's centre -- the Z offset being the plane's height there -- and
-  freezes that frame for the whole print. Bed mesh then holds only the
-  residual (measured mesh less the frozen plane), so mesh fade and the flow
-  mesh both combine with it and act on the residual alone, and a mesh
-  cleared or reloaded mid-print never changes the frame. If a tilted move
+  freezes that frame for the whole print. The frame is applied last, under
+  bed mesh, so the bed mesh correction is rotated with it (applied along
+  the plate's normal), fade follows the print's own height, and the flow
+  mesh absorbs the plate relative to the tilted plane; a mesh cleared or
+  reloaded mid-print never changes the frame. If a tilted move
   would go further outside the machine's travel than the file already does,
   the tilt is reduced until none does. `TILT_CORRECTION_TOGGLE ENABLE=1`
   uses it for the next print. Off by default and not yet tested on hardware. See [the tilt correction page](docs/tilt-correction.md).

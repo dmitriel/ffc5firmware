@@ -28,9 +28,9 @@
 #     calibration falls back to carriage_contact_z + nozzle_gap + z_adjust.
 #   * an active bed mesh is added at the move's X/Y: the mesh is the
 #     plate's measured shape, and bed_mesh has already added it to the move.
-#     Under tilt correction the frame carries the plate's fitted plane and
-#     bed_mesh only the rest; the measured mesh (ResidualMesh.plate) is
-#     still the plate, so that is what is compared against.
+#     Under tilt correction bed_mesh holds the plate in the tilted frame;
+#     the measured mesh (FrameMesh.plate) is still the plate in machine
+#     coordinates, so that is what is compared against.
 # The carriage and nozzle limits are both checked; the higher one wins.
 #
 # MESH TOLERANCE. bed_mesh does not follow its mesh exactly: it splits a
@@ -210,9 +210,10 @@ class FFBedGuard:
         if self.bed_mesh is None:
             return None
         mesh = self.bed_mesh.get_mesh()
-        # Under tilt correction bed_mesh holds the residual (the plate less
-        # the plane the tilted frame already carries); the nozzle has to
-        # clear the measured plate itself, which the residual wraps.
+        # Under tilt correction bed_mesh holds the plate in the tilted frame
+        # (and its output is rotated after it); moves reach this check in
+        # machine coordinates, so compare with the measured plate, which
+        # the frame mesh wraps.
         mesh = getattr(mesh, 'plate', mesh)
         if mesh is None or getattr(mesh, 'mesh_matrix', None) is None:
             return None

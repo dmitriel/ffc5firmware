@@ -46,12 +46,12 @@ height, a warning says so. Travel slightly above the current layer
 the nozzle descends to the right height before it starts extruding; travel
 higher than that, a Z-hop, keeps the current layer's offset.
 
-WITH TILT CORRECTION. ff_tilt_correction sits below this transform and
-holds the plate's fitted plane in a frozen, tilted frame; bed_mesh then
-holds the residual (measured mesh less that plane), and that residual is
-what this absorbs. Print-frame Z is still the layer height, so the layer
-tracking is unchanged; the residual is looked up where the tilted nozzle
-lands (bed_xy).
+WITH TILT CORRECTION. ff_tilt_correction rotates everything under bed_mesh
+onto the plate's fitted plane, frozen at the print start, and bed_mesh then
+holds the plate in that tilted frame (its height above the plane, along
+the normal). This transform, its layers and its mesh lookups are all in
+that frame already, so nothing here changes: it absorbs the plate relative
+to the plane, and the nozzle stays on the tilted plane, not machine Z.
 
 HOW IT SITS IN KLIPPER. bed_mesh keeps its mesh loaded and goes on adding
 it to every move, so ff_bed_guard, the screens and anything else that reads
@@ -171,16 +171,6 @@ class FFFlowMesh:
         offsets = toolchange.gcode_transform._offsets()
         return None if offsets is None else offsets[:2]
 
-    def _bed_xy(self, x, y, z):
-        """Where the nozzle really lands: with tilt correction below us the
-        frame leans, and the (residual) mesh is looked up under the lean.
-        z is our own input Z rather than our output; the difference moves
-        the lookup by slope x offset, well under a micron."""
-        tilt = self.printer.lookup_object('ff_tilt_correction', None)
-        if tilt is None:
-            return x, y
-        return tilt.bed_xy(x, y, z)
-
     def _surface_heights(self, z, extruding):
         """The layer heights that place the nozzle for a move at Z."""
         heights = self.layers.heights()
@@ -267,8 +257,8 @@ class FFFlowMesh:
             f = float(i) / count
             px, py = lx + (x - lx) * f, ly + (y - ly) * f
             pz = lz + (z - lz) * f
-            bx, by = self._bed_xy(px + tool[0], py + tool[1], pz)
-            offset, flow = self.adjust(bx, by, pz - babystep, extruding)
+            offset, flow = self.adjust(px + tool[0], py + tool[1],
+                                       pz - babystep, extruding)
             out_e += de / count * (flow if extruding else 1.)
             self.next_transform.move([px, py, pz + offset, out_e] + rest,
                                      speed)

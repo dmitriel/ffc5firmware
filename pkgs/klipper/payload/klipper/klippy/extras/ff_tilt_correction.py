@@ -46,31 +46,42 @@ onto n (Rodrigues, axis z x n), a print-frame point p goes to
 
 which puts the print's z = 0 exactly onto the fitted plane, its origin at
 height z0 (the frame's Z offset: the mean mesh height over the footprint),
-its Z axis along n, and keeps every length (rigid). The transform sends q
-down the chain as it is -- the tilt and the offset are entirely its own.
+its Z axis along n, and keeps every length (rigid).
 
-THE MESH BECOMES THE RESIDUAL. Since the frame already carries the plane,
-bed_mesh must not add it again. While the correction is on, bed_mesh holds
-ResidualMesh(measured, plane): the measured mesh less the FROZEN plane,
-node by node on the same grid, so calc_z is exactly measured - plane.
-Everything that shapes the effective mesh then acts on the residual only,
-never on the frame:
+WHERE IT SITS: LAST. Klipper's chain runs gcode_move -> [flow mesh,
+exclude_object] -> ff_toolchange's tool frame -> bed_mesh -> toolhead, and
+bed_mesh calls toolhead.move itself. The tilt is a stage in place of
+bed_mesh's toolhead, so EVERYTHING above it -- the tool offsets, the bed
+mesh, its fade, the flow mesh -- works in the tilted frame, and the stage
+rotates the result, mesh correction included:
 
-  * bed_mesh fade fades the residual out with height; the part stays square
-    to the plate all the way up.
-  * the flow mesh (above this transform) absorbs the residual into the first
-    layers; it looks the residual up where the tilted nozzle really lands.
-  * a mesh loaded mid-print (BED_MESH_PROFILE LOAD, a new calibration) is
-    rebased on the same frozen plane on the way in -- bed_mesh.set_mesh is
-    wrapped for the duration -- and BED_MESH_CLEAR leaves the frame tilted.
+  * the bed mesh is looked up at frame (u, v) and added along the frame's
+    Z, i.e. along the plate's normal;
+  * fade is a function of frame height, so a layer fades by the same
+    amount across the whole bed, not by a band that follows the plane;
+  * the flow mesh tracks layers in the print's own Z and absorbs the mesh
+    in the frame.
 
-The nozzle ends at q + (whatever the effective residual is there). The
-ff_bed_guard compares against the measured plate (ResidualMesh.plate), which
-is what the nozzle must clear.
+THE MESH IN THE FRAME. bed_mesh therefore holds FrameMesh(measured, map):
+at frame (u, v), the measured plate's height above the fitted plane
+MEASURED ALONG n. With Q0 the frame point on the plane and r = measured -
+plane, the plate lies where Q0 + w n meets it, w = r(Q0 + w n) / s -- a
+fixed point, two iterations closing it far below a micron. A first-layer
+point h up then sits exactly h from the plate along the normal.
 
-R is orthonormal, so the map is affine with an exact inverse (R transposed):
-lines stay lines, no splitting, and get_position() is exact. Dock moves,
-which ff_toolchange runs in the raw machine frame, pass through untouched.
+FROZEN. The map is computed once, at TILT_CORRECTION_START, and nothing
+recomputes it. bed_mesh.set_mesh is wrapped for the duration, so a mesh
+loaded mid-print is re-expressed in the same frozen frame and
+BED_MESH_CLEAR leaves the frame tilted. The probed matrix stays the
+measured one (bed_mesh's save_profile writes it), and ff_bed_guard reads
+the measured plate (FrameMesh.plate) against final machine coordinates.
+
+The stage maps the toolhead point the tool frame produced: X/Y are
+toolhead coordinates, Z less the mounted tool's Z offset (gap + job term)
+is the print height, which is what rotates; the offset is added back
+after. In the raw machine frame (dock moves: no tool) it passes through.
+R is orthonormal, so the map is affine with an exact inverse (R
+transposed): lines stay lines, and get_position() is exact.
 
 The module level functions hold the arithmetic and touch nothing in klippy;
 qa/static/test_ff_tilt_correction.py tests them directly.
@@ -476,55 +487,58 @@ def mesh_nodes(matrix, params, offsets):
              for c, z in enumerate(line)] for r, line in enumerate(matrix)]
 
 
-def _residual_matrix(matrix, params, offsets, plane):
-    """matrix less plane() at each node."""
-    nodes = mesh_nodes(matrix, params, offsets)
-    return [[z - plane(x, y) for x, y, z in line]
-            for line in nodes] or [[]]
+class FrameMesh:
+    """A bed_mesh ZMesh re-expressed in the tilted frame: what bed_mesh
+    applies while the stage rotates its output.
 
+    calc_z(u, v) is the measured plate's height above the fitted plane,
+    along the plane's normal, under frame point (u, v). `plate` is the
+    measured mesh itself, for whoever needs the real plate (ff_bed_guard).
 
-class ResidualMesh:
-    """A bed_mesh ZMesh less a frozen plane: what bed_mesh applies while the
-    frame carries the plane. `plate` is the measured mesh itself, for
-    whoever needs the real plate (ff_bed_guard).
+    The probed matrix stays the measured one, because bed_mesh's
+    save_profile writes it out: a BED_MESH_PROFILE SAVE mid-print must save
+    the plate, never this. Profile name, params and BED_MESH_OUTPUT are the
+    measured mesh's too; the interpolated matrix and its range/average
+    (which fade reads) are this one's, on the same nodes."""
 
-    Only what bed_mesh APPLIES is the residual: calc_z, the interpolated
-    matrix and its range/average (fade reads those). The PROBED matrix stays
-    the measured one, because bed_mesh's save_profile writes it out: a
-    BED_MESH_PROFILE SAVE mid-print must save the plate, never the residual.
-    Profile name, params and BED_MESH_OUTPUT are the measured mesh's too."""
+    ITERATIONS = 2
 
     def __init__(self, plate, tilt):
         self.plate = plate
         self.tilt = tilt
         params = plate.get_mesh_params()
         offsets = list(getattr(plate, 'mesh_offsets', (0., 0.)))
-        self.residual_matrix = _residual_matrix(
-            plate.get_mesh_matrix(), params, offsets, tilt.plane)
+        self.frame_matrix = [[self.calc_z(u, v) for u, v, _z in line]
+                             for line in mesh_nodes(plate.get_mesh_matrix(),
+                                                    params, offsets)] or [[]]
 
     def __getattr__(self, name):
         return getattr(self.plate, name)
 
-    def calc_z(self, x, y):
-        # Bilinear on the same nodes: exactly measured - plane, inside the
-        # mesh. Outside, the measured mesh clamps to its edge and the plane
-        # goes on, so the nozzle still lands on the measured plate.
-        return self.plate.calc_z(x, y) - self.tilt.plane(x, y)
+    def calc_z(self, u, v):
+        t = self.tilt
+        x0, y0, _z = t.forward(u, v, 0.)
+        nx, ny, _nz = t.normal
+        w = 0.
+        for _ in range(self.ITERATIONS):
+            x, y = x0 + w * nx, y0 + w * ny
+            w = (self.plate.calc_z(x, y) - t.plane(x, y)) / t.s
+        return w
 
     def get_mesh_matrix(self):
-        return [[round(z, 6) for z in line] for line in self.residual_matrix]
+        return [[round(z, 6) for z in line] for line in self.frame_matrix]
 
     def get_z_range(self):
-        values = [z for line in self.residual_matrix for z in line]
+        values = [z for line in self.frame_matrix for z in line]
         return (min(values), max(values)) if values else (0., 0.)
 
     def get_z_average(self):
-        values = [z for line in self.residual_matrix for z in line]
+        values = [z for line in self.frame_matrix for z in line]
         return round(sum(values) / len(values), 2) if values else 0.
 
 
 def plate_of(mesh):
-    """The measured mesh behind a ResidualMesh (or the mesh itself)."""
+    """The measured mesh behind a FrameMesh (or the mesh itself)."""
     return getattr(mesh, 'plate', mesh)
 
 
@@ -535,14 +549,16 @@ def plate_of(mesh):
 AXES = 'XYZ'
 
 
-def envelope_excess(tilt, boxes, env_min, env_max, z_low=0., z_high=0.):
+def envelope_excess(tilt, boxes, env_min, env_max, z_low=0., z_high=0.,
+                    w_low=0., w_high=0.):
     """Worst excursion beyond the envelope, per axis and side.
 
     boxes: [(x0, x1, y0, y1, z0, z1)] in toolhead X/Y and G-code Z. Each
     box's eight corners go through the map -- affine, so a box's image is
-    bounded by its corners' images. Toolhead Z adds what the chain below
-    adds: z_low/z_high are the least/most of (tool Z offset + job Z +
-    residual mesh, faded or not).
+    bounded by its corners' images. w_low/w_high is what the bed mesh adds
+    IN THE FRAME (along the normal, faded or not): it widens each box's Z
+    before the map, so its X/Y lean is counted too. z_low/z_high is what
+    is added after the map in machine Z: the tools' Z offsets.
 
     Returns {(axis, side): (excess_mm, corner)}, side 0 below env_min and 1
     above env_max; excess is negative when inside with that much margin.
@@ -551,7 +567,7 @@ def envelope_excess(tilt, boxes, env_min, env_max, z_low=0., z_high=0.):
     for box in boxes:
         for x in box[0:2]:
             for y in box[2:4]:
-                for z in box[4:6]:
+                for z in (box[4] + w_low, box[5] + w_high):
                     out = tilt.forward(x, y, z)
                     values = (
                         (out[0], out[0]), (out[1], out[1]),
@@ -576,11 +592,13 @@ def fits(excess, baseline):
 
 
 def choose_scale(fit, boxes, env_min, env_max, z_extra=None,
-                 max_slope=None, max_scale=1., steps=SCALE_STEPS):
+                 max_slope=None, max_scale=1., steps=SCALE_STEPS,
+                 z_low=0., z_high=0.):
     """The largest scale <= max_scale (and slope <= max_slope) that fits.
 
-    z_extra(scale) -> (low, high): what the chain below adds to Z at that
-    scale (the residual depends on which plane is taken out of the mesh).
+    z_extra(scale) -> (low, high): what the bed mesh adds in the frame at
+    that scale (the plate above the plane being tried). z_low/z_high: the
+    tools' Z offsets, added in machine Z.
     Returns (scale, limit) -- limit is '' at the full scale, else what held
     it back: 'max_slope', or the (axis, side) that would have gone out.
     """
@@ -591,7 +609,7 @@ def choose_scale(fit, boxes, env_min, env_max, z_extra=None,
     def excess_at(scale):
         lo, hi = z_extra(scale)
         return envelope_excess(scaled_map(fit, scale), boxes, env_min,
-                               env_max, lo, hi)
+                               env_max, z_low, z_high, lo, hi)
     slope = math.hypot(fit['gx'], fit['gy'])
     top, limit = float(max_scale), ''
     if max_slope is not None and slope * top > max_slope:
@@ -614,6 +632,26 @@ def choose_scale(fit, boxes, env_min, env_max, z_extra=None,
 ######################################################################
 # Klipper glue
 ######################################################################
+
+class TiltStage:
+    """Stands in for the toolhead under bed_mesh: every move bed_mesh makes,
+    mesh correction included, goes through the frozen map on its way to
+    the real toolhead; get_position comes back through the inverse.
+    Everything else is the toolhead's."""
+
+    def __init__(self, owner, toolhead):
+        self.owner = owner
+        self.toolhead = toolhead
+
+    def __getattr__(self, name):
+        return getattr(self.toolhead, name)
+
+    def move(self, newpos, speed):
+        self.toolhead.move(self.owner.to_machine(newpos), speed)
+
+    def get_position(self):
+        return self.owner.to_frame(self.toolhead.get_position())
+
 
 class _ScanJob:
     def __init__(self, key, path, scan):
@@ -656,7 +694,7 @@ class FFTiltCorrection:
         self.max_slope = config.getfloat('max_slope', .01, above=0.)
         self.scan_timeout = config.getfloat('scan_timeout', 300., above=0.)
         self.env_min, self.env_max = self._envelope(config)
-        self.next_transform = None
+        self.stage = None
         self.tilt = None
         self.active = False
         self.job = None
@@ -700,14 +738,6 @@ class FFTiltCorrection:
     def _toolchange(self):
         return self.printer.lookup_object('ff_toolchange', None)
 
-    def _tool_xy(self):
-        """The mounted tool's X/Y offset, or None in the raw machine frame."""
-        toolchange = self._toolchange()
-        if toolchange is None:
-            return (0., 0.)
-        offsets = toolchange.gcode_transform._offsets()
-        return None if offsets is None else offsets[:2]
-
     def _tool_offsets(self, tool):
         """(x, y, z) the chain below adds for `tool`, job Z included."""
         toolchange = self._toolchange()
@@ -730,130 +760,101 @@ class FFTiltCorrection:
         return self.printer.lookup_object('bed_mesh', None)
 
     def _plate(self):
-        """The MEASURED mesh -- under a ResidualMesh if one is loaded."""
+        """The MEASURED mesh -- under a FrameMesh if one is loaded."""
         bed_mesh = self._bed_mesh()
         mesh = None if bed_mesh is None else bed_mesh.get_mesh()
         return None if mesh is None else plate_of(mesh)
 
-    # -- the transform --------------------------------------------------------
-    def move(self, newpos, speed):
-        tool = self._tool_xy()
-        if tool is None or self.tilt is None:
-            self.next_transform.move(newpos, speed)
-            return
-        x, y, z = self.tilt.forward(newpos[0] + tool[0], newpos[1] + tool[1],
-                                    newpos[2])
-        self.next_transform.move([x - tool[0], y - tool[1], z]
-                                 + list(newpos[3:]), speed)
+    # -- the stage ------------------------------------------------------------
+    def _frame_z(self):
+        """The mounted tool's Z offset (gap + job term), or None in the raw
+        machine frame (no tool: dock moves, calibrations)."""
+        toolchange = self._toolchange()
+        if toolchange is None:
+            return 0.
+        offsets = toolchange.gcode_transform._offsets()
+        return None if offsets is None else offsets[2]
 
-    def get_position(self):
-        pos = self.next_transform.get_position()
-        tool = self._tool_xy()
-        if tool is None or self.tilt is None:
-            return pos
-        x, y, z = self.tilt.inverse(pos[0] + tool[0], pos[1] + tool[1],
-                                    pos[2])
-        return [x - tool[0], y - tool[1], z] + list(pos[3:])
+    def to_machine(self, pos):
+        oz = self._frame_z()
+        if oz is None or self.tilt is None:
+            return list(pos)
+        x, y, z = self.tilt.forward(pos[0], pos[1], pos[2] - oz)
+        return [x, y, z + oz] + list(pos[3:])
 
-    def bed_xy(self, x, y, z):
-        """Where a print-frame toolhead point really lands in X/Y: the flow
-        mesh looks its residual up there. (x, y) itself when off."""
-        if not self.active or self.tilt is None:
-            return x, y
-        return self.tilt.forward(x, y, z)[:2]
+    def to_frame(self, pos):
+        oz = self._frame_z()
+        if oz is None or self.tilt is None:
+            return list(pos)
+        x, y, z = self.tilt.inverse(pos[0], pos[1], pos[2] - oz)
+        return [x, y, z + oz] + list(pos[3:])
 
     # -- installing ---------------------------------------------------------------
-    def _link(self):
-        """Into the chain directly above the per-tool frame: below the flow
-        mesh and exclude_object, whichever of them is already installed,
-        so they see print-frame coordinates and the tilt sees theirs."""
-        gcode_move = self.printer.lookup_object('gcode_move')
-        toolchange = self._toolchange()
-        anchor = None if toolchange is None else toolchange.gcode_transform
-        node = gcode_move.move_transform
-        if anchor is not None and node is not anchor:
-            while node is not None and \
-                    getattr(node, 'next_transform', None) is not anchor:
-                node = getattr(node, 'next_transform', None)
-            if node is not None:
-                self.next_transform = anchor
-                node.next_transform = self
-                return
-        self.next_transform = gcode_move.set_move_transform(self, force=True)
-
-    def _unlink(self):
-        gcode_move = self.printer.lookup_object('gcode_move')
-        if gcode_move.move_transform is self:
-            gcode_move.set_move_transform(self.next_transform, force=True)
-            return
-        node = gcode_move.move_transform
-        while node is not None and \
-                getattr(node, 'next_transform', None) is not self:
-            node = getattr(node, 'next_transform', None)
-        if node is None:
-            raise self.gcode.error(
-                "tilt correction: not found in the move transform chain")
-        node.next_transform = self.next_transform
-
     def _hook_set_mesh(self, bed_mesh):
-        """Every mesh bed_mesh is given while the frame is tilted is rebased
-        on the frozen plane on its way in; None (BED_MESH_CLEAR) stays None.
-        The frame itself never changes."""
+        """Every mesh bed_mesh is given while the frame is tilted is
+        re-expressed in the frozen frame on its way in; None (BED_MESH_CLEAR)
+        stays None. The frame itself never changes."""
         if 'set_mesh' in vars(bed_mesh):
             return
         original = bed_mesh.set_mesh
 
         def set_mesh(mesh, *args, **kwargs):
             if mesh is not None and self.tilt is not None:
-                mesh = ResidualMesh(plate_of(mesh), self.tilt)
+                mesh = FrameMesh(plate_of(mesh), self.tilt)
             return original(mesh, *args, **kwargs)
         bed_mesh.set_mesh = set_mesh
 
-    def install(self, tilt):
-        """Freeze `tilt` for the rest of the print."""
-        gcode_move = self.printer.lookup_object('gcode_move')
-        bed_mesh = self._bed_mesh()
-        plate = self._plate()
-        previous = self.tilt
-        self.tilt = tilt
-        linked = False
-        if not self.active:
-            self._link()
-            linked = True
-        self.active = True
-        try:
-            self._hook_set_mesh(bed_mesh)
-            # Through the hook: the residual against THIS plane.
-            bed_mesh.set_mesh(plate)
-        except Exception:
-            # e.g. bed_mesh refusing the residual against its fade range:
-            # leave everything as it was.
-            self.tilt = previous
-            if linked:
-                self._unlink()
-                self.active = False
-                self._unhook_set_mesh(bed_mesh, plate)
-            elif previous is not None:
-                bed_mesh.set_mesh(plate)
-            raise
-        gcode_move.reset_last_position()
-
-    def _unhook_set_mesh(self, bed_mesh, plate=None):
+    def _unhook_set_mesh(self, bed_mesh):
         if 'set_mesh' in vars(bed_mesh):
             del bed_mesh.set_mesh
         mesh = bed_mesh.get_mesh()
         if mesh is not None and mesh is not plate_of(mesh):
             bed_mesh.set_mesh(plate_of(mesh))       # the measured mesh back
 
+    def install(self, tilt):
+        """Freeze `tilt` for the rest of the print."""
+        bed_mesh = self._bed_mesh()
+        plate = self._plate()
+        previous = self.tilt
+        self.tilt = tilt
+        staged = False
+        if not self.active:
+            self.stage = TiltStage(self, bed_mesh.toolhead)
+            bed_mesh.toolhead = self.stage
+            staged = True
+        self.active = True
+        try:
+            self._hook_set_mesh(bed_mesh)
+            # Through the hook: the plate in THIS frame. set_mesh resets
+            # gcode_move's position, through the stage.
+            bed_mesh.set_mesh(plate)
+        except Exception:
+            # e.g. bed_mesh refusing the mesh against its fade range: leave
+            # everything as it was.
+            self.tilt = previous
+            if staged:
+                bed_mesh.toolhead = self.stage.toolhead
+                self.stage = None
+                self.active = False
+                self._unhook_set_mesh(bed_mesh)
+            elif previous is not None:
+                bed_mesh.set_mesh(plate)
+            raise
+        self.printer.lookup_object('gcode_move').reset_last_position()
+
     def stop(self):
         if not self.active:
             return False
-        self._unlink()
+        bed_mesh = self._bed_mesh()
+        if bed_mesh.toolhead is not self.stage:
+            raise self.gcode.error(
+                "tilt correction: bed_mesh's toolhead was replaced by "
+                "something else; cannot remove the stage safely")
+        bed_mesh.toolhead = self.stage.toolhead
+        self.stage = None
         self.active = False
         self.tilt = None
-        bed_mesh = self._bed_mesh()
-        if bed_mesh is not None:
-            self._unhook_set_mesh(bed_mesh)
+        self._unhook_set_mesh(bed_mesh)
         self.printer.lookup_object('gcode_move').reset_last_position()
         return True
 
@@ -939,7 +940,8 @@ class FFTiltCorrection:
             points.append((x, y, mesh.calc_z(x, y)))
         fit = fit_plane(points, self.min_span)
 
-        # Extents, per tool, in toolhead X/Y and G-code Z.
+        # Extents, per tool, in toolhead X/Y and G-code Z (the frame's own Z:
+        # the tool's Z offset is added after the rotation, not rotated).
         boxes = []
         z_lo = z_hi = None
         for tool, box in scan.boxes():
@@ -950,10 +952,12 @@ class FFTiltCorrection:
             z_lo = oz if z_lo is None else min(z_lo, oz)
             z_hi = oz if z_hi is None else max(z_hi, oz)
         z_lo, z_hi = z_lo or 0., z_hi or 0.
-        # What bed_mesh adds below us is the residual against the plane of
-        # the scale being tried -- faded by any factor 0..1 towards
-        # fade_target, which lies within it (or is 0), so 0 is included.
-        # residual = (mesh - z0) - scale * (g . d): linear in the scale.
+        # What bed_mesh adds, in the frame, is the plate above the plane of
+        # the scale being tried, along its normal: (mesh - plane) / s, faded
+        # by any factor 0..1 towards fade_target, which lies within it (or
+        # is 0), so 0 is included. mesh - plane = (mesh - z0) - scale *
+        # (g . d): linear in the scale. (Taken at the nodes' own X/Y rather
+        # than where the normal meets them: microns of difference.)
         params = mesh.get_mesh_params()
         offsets = list(getattr(mesh, 'mesh_offsets', (0., 0.)))
         nodes = [(z - fit['z0'],
@@ -963,10 +967,13 @@ class FFTiltCorrection:
                  for x, y, z in line]
 
         def z_extra(scale):
-            values = [a - scale * b for a, b in nodes] or [0.]
-            return (z_lo + min(0., min(values)), z_hi + max(0., max(values)))
+            s = math.sqrt(1. + (scale * fit['gx']) ** 2
+                          + (scale * fit['gy']) ** 2)
+            values = [(a - scale * b) / s for a, b in nodes] or [0.]
+            return min(0., min(values)), max(0., max(values))
         scale, limit = choose_scale(fit, boxes, self.env_min, self.env_max,
-                                    z_extra, self.max_slope, max_scale)
+                                    z_extra, self.max_slope, max_scale,
+                                    z_low=z_lo, z_high=z_hi)
         tilt = scaled_map(fit, scale)
         top = max([b[5] for b in boxes] or [0.])
         report = dict(fit)
@@ -986,7 +993,7 @@ class FFTiltCorrection:
             % (r['cells'], r['area'] / 100., r['x0'], r['y0'], r['z0'],
                r['gx'] * 100., r['gy'] * 100.),
             "mesh over the footprint: %.4f mm rms about its mean, %.4f mm "
-            "rms about the plane (the residual bed_mesh now holds)"
+            "rms about the plane (what bed_mesh now applies, in the frame)"
             % (r['rms'],
                                                          r['residual'])]
         if r['dropped']:
