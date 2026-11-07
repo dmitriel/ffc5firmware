@@ -103,6 +103,15 @@ both printer models or through every real-world workflow.
 - `START_PRINT` starts heating the bed before the first homing instead of after
   it, so the bed is closer to temperature when the nozzle clean ends.
 
+### Fixed
+
+- `RESUME` after a `PURGE`, `LOAD_FILAMENT` or `UNLOAD_FILAMENT` during a
+  pause no longer drives the mounted tool into a docked one. Those macros
+  leave the head at the purge chute or the wipe spot, beside the docks, and
+  the resume used to go back to the print in one diagonal move. It now
+  backs out of the dock bay along X first, rises to the pause's park height,
+  crosses to the print, and only then descends.
+
 ## v20260827f-melitopol — 2026-09-24
 
 ### Added

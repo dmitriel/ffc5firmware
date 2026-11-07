@@ -811,3 +811,65 @@ def test_no_print_start_path_calls_a_macro_inside_itself(model):
         for mode in ("auto", "off", "fixed", "adaptive", "thermal"):
             _run(model, "_FF_MESH MODE=%s" % mode, has_heater=False,
                  extra=extra)
+
+
+# -- resume after a paused purge -------------------------------------------
+
+def _resume_printer(head, paused=(130.0, 120.0, 42.0)):
+    x, y, z = head
+    return {"gcode_move": {"gcode_position": {"x": x, "y": y, "z": z}},
+            "toolhead": {"homed_axes": "xyz"},
+            "configfile": {"settings": {"ff_toolchange": {"x_safe": 250.0}}},
+            "gcode_macro PAUSE": {"saved": 1, "lift": 10.0, "park_max": 256.0,
+                                  "x": paused[0], "y": paused[1],
+                                  "z": paused[2]}}
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("head", [
+    (275.0, 254.0, 52.0),     # purge chute, after PURGE WIPE=0 / LOAD_FILAMENT
+    (266.5, 13.8, 10.0),      # wipe spot, after PURGE's wipe
+])
+def test_resume_leaves_the_dock_bay_along_x_then_rises_then_crosses(model,
+                                                                    head):
+    out, _ = _render_one(model, "_FF_RESUME_TRAVEL", {},
+                         extra=_resume_printer(head))
+    moves = [c for c in out if c.startswith("G1")]
+    # X alone first, to x_safe: no Y or Z while still beside the docks.
+    assert moves[0] == "G1 X250.0 F12000"
+    # Never lower than the head already is, and at least the park height.
+    assert moves[-1] == "G1 X130.0 Y120.0 F12000"
+    if head[2] < 52.0:
+        assert moves[1] == "G1 Z52.0 F600"
+    else:
+        assert len(moves) == 2
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_resume_from_the_park_over_the_print_does_not_move(model):
+    out, _ = _render_one(model, "_FF_RESUME_TRAVEL", {},
+                         extra=_resume_printer((130.0, 120.0, 52.0)))
+    assert not any(c.startswith("G1") for c in out)
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_resume_travels_before_base_resume(model):
+    out, _ = _render_one(model, "RESUME", {}, extra={
+        "pause_resume": {"is_paused": True},
+        "ff_toolchange": {"current_tool": 1},
+        "gcode_macro PAUSE": {"t0": 0.0, "t1": 220.0, "t2": 0.0, "t3": 0.0}})
+    assert out.index("_FF_RESUME_TRAVEL") < out.index("BASE_RESUME")
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_pause_records_where_the_print_stopped(model):
+    out, _ = _render_one(model, "PAUSE", {}, extra={
+        "pause_resume": {"is_paused": False},
+        "gcode_move": {"gcode_position": {"x": 130.0, "y": 120.0, "z": 42.0}},
+        "toolhead": {"homed_axes": "xyz", "position": {"z": 45.2}},
+        **{"extruder%s" % (t or ""): {"target": 0.0} for t in range(4)}})
+    for line in ("VARIABLE=x VALUE=130.0", "VARIABLE=y VALUE=120.0",
+                 "VARIABLE=z VALUE=42.0", "VARIABLE=saved VALUE=1"):
+        assert "SET_GCODE_VARIABLE MACRO=PAUSE " + line in out
+    assert out.index("SET_GCODE_VARIABLE MACRO=PAUSE VARIABLE=saved VALUE=1") \
+        < out.index("BASE_PAUSE")
