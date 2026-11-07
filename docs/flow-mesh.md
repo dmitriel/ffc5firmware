@@ -92,9 +92,9 @@ never forced to the limit on a flat spot; it keeps its own height there.
   the babystep moves the nozzle as usual.
 * **The mesh stays loaded.** The bed guard and the screens still see the
   real plate. Bed mesh fade must be off, as it is on a stock printer.
-* **Not with [tilt correction](tilt-correction.md).** The flow mesh absorbs
-  the plate's tilt along with the rest of the mesh; with both toggles on,
-  the flow mesh is used.
+* **With [tilt correction](tilt-correction.md)** the plate's tilt is taken
+  by the print's frame, and the flow mesh absorbs only what is left: the
+  nozzle stays on the tilted plane rather than the machine's flat one.
 * **Tool changes**: the mesh is looked up under the mounted tool; dock moves
   are untouched.
 

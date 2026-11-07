@@ -230,6 +230,20 @@ def test_mesh_raises_the_limit(ff_bed_guard):
     printer.toolhead.move([100., 100., 3.6, 0.])
 
 
+def test_under_tilt_correction_the_measured_plate_is_the_limit(
+        ff_bed_guard):
+    # bed_mesh holds the residual (here 0: a pure plane) while the tilted
+    # frame carries the plane; the plate is still 0.3 up, and the nozzle has
+    # to clear that, not the residual.
+    residual = SimpleNamespace(plate=Mesh(0.3), mesh_matrix=[[0.]],
+                               calc_z=lambda x, y: 0.,
+                               get_z_range=lambda: (0., 0.))
+    printer, _guard, _tc = install(ff_bed_guard, mesh=residual)
+    with pytest.raises(CommandError):
+        printer.toolhead.move([100., 100., 3.5, 0.])
+    printer.toolhead.move([100., 100., 3.6, 0.])
+
+
 class DomeMesh(Mesh):
     """Flat except a bump rising to `height` midway along X 158..182."""
 

@@ -14,8 +14,12 @@ comes out wedge-shaped instead.
 
 **Tilt correction** fits a plane to the mesh under the print. It then tilts
 the print's whole coordinate frame onto that plane, so the part is built
-standing square on the plate. Bed mesh still corrects whatever the plane
-does not explain.
+standing square on the plate. The tilted frame is calculated once, at the
+print start, and frozen for the whole print. Bed mesh then corrects only
+what the plane does not explain, the *residual*. Mesh fade and the
+[flow mesh](flow-mesh.md) both work with it, and both act on that residual
+alone: neither of them, nor a mesh cleared or reloaded mid-print, can
+change the tilted frame.
 
 ```gcode
 TILT_CORRECTION_TOGGLE ENABLE=1     ; prints use it, until a restart
@@ -36,14 +40,16 @@ frame tilted 0.1097 deg; at the top of the print (Z 85.0) the part shifts 0.163 
 ```
 
 If the correction cannot be applied, `START_PRINT` reports the reason and
-prints without it. That happens when there is no mesh (`BED_MESH_MODE off`),
-when the file has no first layer to fit to, or when bed mesh fade is
-configured. `END_PRINT` and a cancel turn the correction off.
+prints without it. That happens when there is no mesh (`BED_MESH_MODE off`)
+or when the file has no first layer to fit to. `END_PRINT` and a cancel
+turn the correction off and put the measured mesh back.
 
-**The flow mesh and tilt correction are alternatives.** The flow mesh absorbs
-the whole mesh in the first layers, tilt included, so the two cannot be
-combined. With both toggles on, the flow mesh wins and the console says
-tilt correction was skipped.
+**With the flow mesh**, the frame takes the plate's tilt and the first
+layers absorb the residual: the nozzle stays on the tilted plane, and the
+first layers are laid thicker over low spots and thinner over high ones
+relative to that plane. **With mesh fade**, the residual fades out with
+height and the tilted frame stays to the top of the print. Fade then works
+from the height of the plane under the nozzle, not from machine Z = 0.
 
 The toggle resets to off on every restart. To make tilt correction the
 default, add this at the end of `printer.cfg`:
@@ -69,7 +75,9 @@ variable_enabled: 1
 3. **Check the envelope.** Each extent box goes through the correction. If
    any of them would move further outside the machine's travel than the
    file already goes, the tilt is reduced.
-4. **Apply.** The correction is installed for the rest of the print.
+4. **Freeze and apply.** The map is computed this once and stored, and is
+   readable as `printer.ff_tilt_correction.transform`. From here on
+   `bed_mesh` holds the measured mesh less the frozen plane.
 
 The rest of this page is the math behind steps 2 to 4.
 
@@ -167,40 +175,62 @@ print's origin (x₀, y₀, 0) lands on the plane at height **z₀**. That is th
 Z offset of the new frame: the mean mesh height over the footprint. The
 print's Z axis follows **n**.
 
-### 3. Sharing the work with bed mesh
+### 3. Freezing the frame, and the residual
 
-Bed mesh sits below the correction in Klipper's chain of move transforms. It
-keeps adding *m(x, y)* to every move. The bed guard and the screens rely on
-that, because they need to see the real plate. The mesh is split into the
-plane and a residual:
+The frame is the map **p** → **q**, and the correction sends **q** down
+Klipper's chain of move transforms as it is. The tilt and the Z offset z₀
+belong to the frame alone. From the moment the map is computed it is
+fixed: nothing reads the mesh to rebuild it.
 
-  m(x, y) = plane(x, y) + residual(x, y)
+Bed mesh sits below the correction and adds its mesh to every move. If it
+still held the measured mesh *m(x, y)*, it would add the plane a second
+time. So while the correction is on, bed mesh holds the **residual**:
 
-The correction sends down
+  r(x, y) = m(x, y) − plane(x, y)
 
-  **out** = ( qₓ, q_y, q_z − plane(qₓ, q_y) )
+It is computed node by node on bed mesh's own interpolated grid, so between
+the nodes it is still exactly *m − plane*. The nozzle then lands at
 
-Bed mesh then adds *m(qₓ, q_y)*. The plane parts cancel and leave the nozzle
-at **q** + residual. The tilt and the Z offset z₀ reach the nozzle through
-the frame. The residual is corrected by bed mesh exactly as standard bed
-mesh corrects the whole mesh. Nothing is added twice.
+  **q** + r(qₓ, q_y)
 
-Working through the algebra, the vertical part simplifies completely. *R*
-maps the plane z = 0 onto the fitted plane, so every x/y term cancels:
+On the first layer that is the measured plate plus one layer height, as
+with standard bed mesh. Above it, the part stands square on the plane.
 
-  out_z = s · z
+Everything that shapes the *effective* mesh then works on *r* alone:
 
-A layer of thickness *h* measured along the normal therefore sits *s·h*
-above the plane, measured vertically. That is the same distance seen from a
-tilted direction. For any real tilt *s* differs from 1 by a few millionths.
+* **Fade** scales what bed mesh adds by a factor that falls from 1 to 0
+  between `fade_start` and `fade_end`. It adds
+  *f·(r − t) + t*, with *t* the fade target (by default the average of *r*).
+  The residual fades out; **q** does not.
+* **The flow mesh** sits above the correction, in the print's own frame. Its
+  layer tracking sees the file's Z, and it absorbs *r* instead of following
+  it. It looks *r* up at (qₓ, q_y), where the leaning nozzle really is, not
+  at the file's X/Y.
+* **A mesh loaded mid-print** (`BED_MESH_PROFILE LOAD`, a new calibration)
+  is turned into its residual against the same frozen plane on the way in.
+  `BED_MESH_CLEAR` removes the residual and leaves the frame tilted.
 
-The whole map **p** → **out** is a matrix multiplication plus a constant,
-an *affine* map:
+The probed points bed mesh keeps, which are what `BED_MESH_PROFILE SAVE`
+writes, stay the measured ones. Saving a profile mid-print saves the plate,
+not the residual. The screens show the residual as the mesh while a tilted
+print runs; `END_PRINT` puts the measured mesh back.
+
+The bed guard has to know where the plate really is, so it reads the
+measured mesh behind the residual.
+
+How tall a layer is: *R* maps the plane z = 0 onto the fitted plane, so a
+point *h* along the normal sits
+
+  q_z − plane(qₓ, q_y) = s · h
+
+above the plane vertically. That is the same distance seen from a tilted
+direction. For any real tilt *s* differs from 1 by a few millionths.
+
+*R* is orthonormal, so the whole map is a rotation plus a constant (an
+*affine* map), and its inverse is the transpose:
 
 ```
-          ⎡ R₁₁   R₁₂   R₁₃ ⎤
-  out  =  ⎢ R₂₁   R₂₂   R₂₃ ⎥ (p − P₀)  +  (x₀, y₀, 0)
-          ⎣  0     0     s  ⎦
+  q  =  R (p − P₀)  +  P            p  =  Rᵀ (q − P)  +  P₀
 ```
 
 An affine map sends straight lines to straight lines, so moves never need
@@ -225,9 +255,11 @@ against an envelope: `envelope_min`/`envelope_max`, by default each axis'
 
 The map is affine. So the image of a box lies within the images of its eight
 corners, and checking the corners is enough. Each corner goes through the
-map into toolhead coordinates. For Z, the check adds what the chain below
-adds: the tools' Z offsets, the job term, and the mesh's lowest and highest
-value. Slab-sized boxes keep this tight: a corner low on the part is never
+map into toolhead coordinates. Z already includes the plane, which now
+rides in the frame. For Z the check adds what the chain below adds: the
+tools' Z offsets, the job term, and the residual's lowest and highest value
+against the plane being tried. 0 is included, because fade can take the
+residual away. Slab-sized boxes keep this tight: a corner low on the part is never
 checked at the height of the part's top.
 
 The tilt is then scaled by a factor σ ∈ [0, 1]. The slope becomes σ**g**,
@@ -238,8 +270,9 @@ already does at σ = 0. If the file is already outside the envelope as
 sliced, the correction is never blamed for it. It is only stopped from
 making things worse.
 
-A reduced σ costs nothing on the first layer. The part of the tilt that is
-dropped stays in the residual, and bed mesh follows it as before. Only the
+A reduced σ costs nothing on the first layer. The frozen plane is the
+reduced one, so the part of the tilt that is dropped stays in the residual,
+and bed mesh follows it as before. Only the
 lean is reduced. A slope steeper than `max_slope` (1 mm per 100 mm) is
 almost certainly a bad mesh rather than a tilted plate, and it is capped
 there.
@@ -248,16 +281,21 @@ there.
 
 ## Things to know
 
-* **It corrects the frame, not the mesh.** Bed mesh stays loaded and
-  active. Your first layer behaves exactly as before.
+* **It corrects the frame; bed mesh keeps the rest.** Your first layer
+  behaves exactly as before: on the plate, plus the flow mesh's thickness
+  changes if that is on.
+* **The frame is frozen at the print start.** Nothing that changes the mesh
+  later changes it. `TILT_CORRECTION_STATUS` shows it, and
+  `TILT_CORRECTION_STOP` ends it.
 * **The scan reads the whole file.** On a large file this takes tens of
   seconds on the printer's processor, which is why it starts while the bed
   heats. If it has not finished by the time the mesh is loaded,
   `START_PRINT` waits for it, up to `scan_timeout`.
 * **Tool changes**: each tool's moves are placed using that tool's offset.
   Dock moves run in the raw machine frame and are untouched.
-* **Bed mesh fade must be off**, as it is on a stock printer. Fade would
-  remove the plane with height while the frame stays tilted.
+* **Mesh fade** heights are machine heights: the tool's ~3.2 mm frame
+  offset, and now the plane's height under the nozzle, are included in
+  them, as they always were for the tool offset.
 
 ---
 
@@ -280,4 +318,5 @@ restate the section with just that option at the end of `printer.cfg`.
 `TILT_CORRECTION_START` also takes `MAX_SCALE=` (0–1, to apply only part of
 the fitted tilt) and `DRY_RUN=1`. `printer.ff_tilt_correction` reports
 `active`, `slope_x`, `slope_y`, `angle`, `pivot`, `z_offset`, `scale`, `rms`,
-`residual` and `reason` (why the last attempt did not apply).
+`residual`, `reason` (why the last attempt did not apply) and `transform`
+(the frozen map: pivot, z₀, slopes, normal and rotation matrix).

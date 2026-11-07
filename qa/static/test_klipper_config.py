@@ -898,15 +898,16 @@ def test_tilt_correction_scans_early_and_applies_after_the_last_clean(model):
 @pytest.mark.parametrize("tilt, flow, expected", [
     (0, 0, []),
     (1, 0, ["TILT_CORRECTION_START OPTIONAL=1"]),
-    (1, 1, []),
+    (1, 1, ["TILT_CORRECTION_START OPTIONAL=1"]),   # combined: flow absorbs
+    (0, 1, []),                                      # the residual
 ])
-def test_tilt_correction_follows_its_toggle_and_yields_to_the_flow_mesh(
+def test_tilt_correction_follows_its_toggle_alongside_the_flow_mesh(
         model, tilt, flow, expected):
     extra = {"gcode_macro TILT_CORRECTION_TOGGLE": {"enabled": tilt},
              "gcode_macro FLOW_MESH_TOGGLE": {"enabled": flow}}
     out, info = _run(model, "_FF_TILT_BEGIN", has_heater=False, extra=extra)
     assert out == expected
-    assert bool(info) == bool(tilt and flow)
+    assert info == []
     scan, _ = _run(model, "_FF_TILT_SCAN", has_heater=False, extra=extra)
     assert scan == (["TILT_CORRECTION_SCAN"] if tilt else [])
 
@@ -915,4 +916,7 @@ def test_tilt_correction_follows_its_toggle_and_yields_to_the_flow_mesh(
 def test_end_print_untilts_the_frame_before_clearing_the_mesh(model):
     out, _ = _render_one(model, "END_PRINT", {}, extra={
         "toolhead": {"position": {"z": 50.0}, "homed_axes": "xyz"}})
-    assert _first(out, "TILT_CORRECTION_STOP") < _first(out, "BED_MESH_CLEAR")
+    # Flow mesh off first (it sits above the tilt), then the tilt, which
+    # hands the measured mesh back, then the mesh is cleared.
+    assert _first(out, "FLOW_MESH_STOP") < _first(out, "TILT_CORRECTION_STOP") \
+        < _first(out, "BED_MESH_CLEAR")

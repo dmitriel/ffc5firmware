@@ -14,11 +14,13 @@ both printer models or through every real-world workflow.
   the background, fits a plane to the active mesh over the first-layer
   footprint (least squares, equal weight per area), tilts the frame about the
   footprint's centre -- the Z offset being the plane's height there -- and
-  leaves the residual to bed mesh. If a tilted move would go further outside
-  the machine's travel than the file already does, the tilt is reduced until
-  none does. `TILT_CORRECTION_TOGGLE ENABLE=1` uses it for the next print.
-  Not combined with the flow mesh or bed mesh fade. Off by default and not
-  yet tested on hardware. See [the tilt correction page](docs/tilt-correction.md).
+  freezes that frame for the whole print. Bed mesh then holds only the
+  residual (measured mesh less the frozen plane), so mesh fade and the flow
+  mesh both combine with it and act on the residual alone, and a mesh
+  cleared or reloaded mid-print never changes the frame. If a tilted move
+  would go further outside the machine's travel than the file already does,
+  the tilt is reduced until none does. `TILT_CORRECTION_TOGGLE ENABLE=1`
+  uses it for the next print. Off by default and not yet tested on hardware. See [the tilt correction page](docs/tilt-correction.md).
 - Flow mesh, a second bed-mesh strategy: the nozzle stays on the flat sliced
   plane and the first layers absorb the plate's unevenness in their
   thickness, with extrusion scaled to match. A layer is never laid thinner
