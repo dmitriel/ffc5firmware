@@ -20,28 +20,50 @@ reports before you print on it.
 
 ```gcode
 G28
-THERMAL_MESH_SWEEP BED_MIN=60 BED_MAX=110 BED_STEP=10 CHAMBER_MIN=30 CHAMBER_MAX=60 CHAMBER_STEP=10 SOAK=600 CHAMBER_SOAK=1800 THRESHOLD=0.01
+THERMAL_MESH_SWEEP BED_MIN=60 BED_MAX=110 BED_STEP=10 CHAMBER_MIN=30 CHAMBER_MAX=60 CHAMBER_STEP=10 SOAK=600 MAX_SOAK=1800 CHAMBER_SOAK=3600 THRESHOLD=0.01
 ```
 
 | Parameter | Default | Meaning |
 |---|---|---|
 | `BED_MIN`, `BED_MAX`, `BED_STEP` | — , `BED_MIN`, 10 | Bed targets, °C. The last step is always `BED_MAX`. |
 | `CHAMBER_MIN`, `CHAMBER_MAX`, `CHAMBER_STEP` | 0, `CHAMBER_MIN`, 10 | Chamber targets. `0` means unheated; on the plain Creator 5 leave both at 0. |
-| `SOAK` | 600 | Seconds to soak after a bed step, once both heaters are at target. |
-| `CHAMBER_SOAK` | `SOAK` | Seconds to soak after a chamber step (and at the first pair). The chamber is slow; make this the longer one. |
+| `CHAMBER_SOAK` | 3600 | Seconds to soak at the very first pair, once both heaters are at target. The only chamber soak in the sweep. |
+| `MAX_SOAK` | `SOAK` or 1800, whichever is longer | Seconds to soak at the first (hottest) bed step of every later chamber set. |
+| `SOAK` | 600 | Seconds to soak after every other bed step. |
+| `COOL_TIMEOUT` | `cool_timeout` (3600) | Seconds to wait for the chamber to cool down to the next, lower, target. If it has not, that chamber set is skipped. |
 | `THRESHOLD` | 0.01 | mm. Meshes are probed again until the mean \|ΔZ\| between the last two is below this. |
 | `RESUME` | 0 | `1` keeps the pairs already in the map and continues. Without it an existing map is moved to `thermal_mesh.json.bak`. |
 | `KEEP_HEAT` | 0 | `1` leaves the heaters at the last pair's targets when the sweep finishes. |
-| `CHAMBER_POINTS`, `BED_POINTS` | 2, 2 | How many probe points the analysis at the end picks for each axis. |
+| `POINTS` | 4 | How many probe points the analysis at the end picks. |
 
-The order is a serpentine, so every move changes one heater by one step:
+The sweep starts hot and works down, because the chamber has a heater but no
+cooling, and the bed cools far faster than the chamber:
 
 ```
-chamber 30: bed 60 → 70 → … → 110
-chamber 40: bed 110 → 100 → … → 60
-chamber 50: bed 60 → … → 110
+chamber 60: bed 110 → 100 → 90 → 80 → 70 → 60     (chamber soak, then bed soaks)
+chamber 50: bed 110 → … → 60                      (wait to cool; long soak at 110)
+chamber 40: bed 110 → … → 60
 …
 ```
+
+* **The chamber is soaked once**, at the first pair (`CHAMBER_SOAK`). It is
+  held at each lower target by its heater after that.
+* **Down to the next chamber target**, the bed is switched off and the sweep
+  waits for the chamber to fall to within `chamber_tolerance` of the new
+  target. If it has not within `COOL_TIMEOUT` — the enclosure holds heat
+  better than expected — that whole set is skipped and the sweep moves on to
+  the next lower one.
+* **Within a set the bed goes from hottest to coolest.** The first step soaks
+  for `MAX_SOAK` (the bed has just come back from off), every later one for
+  `SOAK`.
+* **The bed is never below the chamber.** Bed targets below the chamber
+  target are left out of the plan; at each pair, a bed target below the
+  chamber's measured temperature is skipped too. A bed cannot be held below
+  the air around it.
+
+Skipped sets and pairs are listed under `"skipped"` in the map file and by
+`THERMAL_MESH_STATUS`. The map that results is triangular rather than a full
+grid; the analysis below does not need a full grid.
 
 At every pair it waits for the bed (±`bed_tolerance`) and the chamber (at
 least target − `chamber_tolerance`; a hot bed may carry the chamber past its
@@ -53,7 +75,8 @@ stored. After `max_samples` it stores the last two anyway and marks the pair
 
 Each pair goes to `thermal_mesh.json` beside `printer.cfg` as soon as it is
 done, along with the measured bed and chamber temperatures at the start and
-end of probing. The file shows up in Mainsail's config file list.
+end of probing — the analysis uses those, not the targets. The file shows up
+in Mainsail's config file list.
 
 The sweep runs in the background. `THERMAL_MESH_STATUS` shows where it is;
 `THERMAL_MESH_ABORT` stops it at the end of the current step (a full mesh
@@ -66,28 +89,49 @@ day. Halve the steps for a first look.
 
 ---
 
-## 2. Find the points that move: `THERMAL_MESH_ANALYZE`
+## 2. Separate bed and chamber: `THERMAL_MESH_ANALYZE`
 
 Runs by itself at the end of a sweep; run it again to re-pick points.
 
 ```gcode
-THERMAL_MESH_ANALYZE [CHAMBER_POINTS=2] [BED_POINTS=2] [MIN_SPACING=60]
+THERMAL_MESH_ANALYZE [POINTS=4] [MIN_SPACING=60]
 ```
 
-For every mesh node it computes two numbers, in µm per °C:
+Both heaters change the plate's shape, and they are not independent: a hot
+bed warms the chamber, so a pair swept at chamber 40 °C and bed 110 °C may
+really have been at 44 °C. Comparing map entries by their targets would put
+the chamber's share of that warp on the bed.
 
-* **chamber sensitivity** — the RMS of ΔZ/ΔT between neighbouring chamber
-  targets, at the same bed target, over every bed target;
-* **bed sensitivity** — the same between neighbouring bed targets at the same
-  chamber target.
+So for every mesh node the analysis fits a straight line in both
+temperatures at once, by least squares over every entry, using the
+temperatures **measured** while the entry was probed:
 
-It then takes the most sensitive node for the chamber, the most sensitive for
-the bed, the next for the chamber, the next for the bed, skipping any node
-closer than `MIN_SPACING` mm to one already chosen (halving the spacing if
-that leaves too few). With a single chamber target all four go to the bed.
-The report prints the peak and median of each map — if the peak is not well
-above the median, that axis barely changes the bed and the points for it are
-mostly noise — and the four points are saved in the map file.
+```
+Z = base + bed slope × (bed − bed ref) + chamber slope × (chamber − chamber ref)
+```
+
+The bed slope is how much that node moves per °C of bed with the chamber held
+still, and the chamber slope the reverse. This works on the triangular map the
+sweep produces and on one with skipped pairs. It cannot work if the bed and
+chamber always moved together (the report says so); with a single chamber
+target only the bed is fitted.
+
+It then picks the probe points. Not simply the nodes that move most: if the
+bed and the chamber both bow the middle of the plate, the most sensitive nodes
+for each are all in the middle, and four points there cannot tell a hot bed
+from a warm chamber. Instead each point is chosen to add the most
+information about both temperatures at once — the first is the node that
+moves most overall, later ones where the bed and the chamber warp the plate
+differently — skipping any node closer than `MIN_SPACING` mm to one already
+chosen (halving the spacing if that leaves too few).
+
+The report gives, for each heater, the peak and median slope in µm/°C — if
+the peak is not well above the median, that heater barely changes the bed —
+the correlation between the measured bed and chamber temperatures in the map,
+how far the straight-line model is from the map (curvature and noise), and
+the **overlap** of the two warps at the chosen points: 0 means the points
+tell them apart perfectly, near 1 that they cannot. Each point is labelled
+with the heater that moves it more.
 
 ---
 
@@ -126,7 +170,7 @@ In place of `BED_MESH_PROFILE LOAD=…` or `BED_MESH_CALIBRATE`, after the
 heat soak:
 
 ```gcode
-THERMAL_MESH_APPLY [METHOD=bilinear] [MATCH=absolute] [CORRECT=none] [SAVE=<profile>] [DRY_RUN=1]
+THERMAL_MESH_APPLY [METHOD=model] [MATCH=absolute] [CORRECT=none] [SAVE=<profile>] [DRY_RUN=1]
 ```
 
 It runs `before_sample_gcode` (park, `G28 Z`, as the sweep did before every
@@ -151,7 +195,8 @@ distance between what was probed and the mesh that was loaded.
 |---|---|---|
 | `nearest` | The single map entry whose four points are closest (RMS). | Checking the map; or a map so dense the neighbours barely differ. |
 | `idw` | Inverse-distance blend of the `K` closest entries (default 4), weight 1/rms^`POWER` (default 2). An exact hit returns that mesh unchanged. | The bed's state is between samples but not on a clean grid, e.g. after a `RESUME` left gaps. |
-| `bilinear` (default) | Treats the map as a grid over (chamber, bed) and searches every fully sampled cell for the point whose bilinearly interpolated four values best fit the probe. Loads the mesh interpolated at that point and reports the chamber and bed temperatures it corresponds to. | Normally. Expansion is close to linear over one step, so this reproduces states between the sampled ones rather than snapping to one. |
+| `model` (default) | Solves for the bed and chamber temperatures whose model mesh (above) best fits the probed points, by least squares, clamped to the measured range. Loads the model's mesh at those temperatures, plus what the straight line misses there, taken from the `K` closest map entries (default 4). | Normally. It works anywhere in the swept range, including along the triangular map's diagonal, and keeps bed and chamber apart. |
+| `bilinear` | Treats the map as a grid over (chamber, bed) and searches every fully sampled cell for the point whose bilinearly interpolated four values best fit the probe. Loads the mesh interpolated at that point and reports the chamber and bed temperatures it corresponds to. | A dense, full grid. Cells missing a corner — along the diagonal where the sweep skips a bed below the chamber — are not searched. |
 | `temperature` | No probing: interpolates the map at the current bed and chamber readings (or `BED=` / `CHAMBER=`), clamped to the swept range. | A quick start, or to compare with what the probe says. A large difference between the two means the plate is not at the state its thermistors suggest — usually an unfinished soak. |
 
 ### Comparing: `MATCH`
@@ -179,17 +224,16 @@ and the height from today's probe.
 
 These are not built in, but the map file has everything they need:
 
-* **Hybrid prior.** Start `bilinear`'s search at the `temperature` estimate and
+* **Hybrid prior.** Start `model`'s fit at the `temperature` estimate and
   penalise distance from it, so a noisy probe cannot pick a wildly different
   state than the thermistors suggest.
-* **Modal fit.** Take the principal components of the map's meshes (most
-  plates are one bow and one tilt), and fit their coefficients to the four
-  points by least squares. This can produce shapes between, not only on, the
-  map's grid lines, and four points determine up to four modes.
+* **Curved model.** Add a squared bed term (or a bed × chamber term) to the
+  per-node fit if the report's straight-line error is large compared with
+  `THRESHOLD`; that costs one more unknown per term and wants more points.
 * **Radial basis / thin-plate correction.** Instead of a plane, spread the
   four residuals with a thin-plate spline, so a local disagreement stays
   local.
-* **More points.** `CHAMBER_POINTS=3 BED_POINTS=3` costs two more probes and
+* **More points.** `THERMAL_MESH_ANALYZE POINTS=6` costs two more probes and
   makes every method more robust to one bad touch.
 
 ---
@@ -207,6 +251,7 @@ section with just that option at the end of `printer.cfg`.
 | `bed_tolerance` | 1.0 | °C either side of the bed target. |
 | `chamber_tolerance` | 2.0 | °C below the chamber target. |
 | `heat_timeout` | 5400 | Seconds to reach a pair's targets before the sweep stops. |
+| `cool_timeout` | 3600 | Seconds the chamber has to cool to a lower target before that set is skipped (`COOL_TIMEOUT`). |
 | `max_samples` | 6 | Full meshes per pair at most. |
 | `min_point_spacing` | 60 | mm between chosen points. |
 | `before_sample_gcode` | park, `G28 Z`, `BED_MESH_CLEAR`, fan off | Before every mesh in the sweep and before the probe in `APPLY`. |

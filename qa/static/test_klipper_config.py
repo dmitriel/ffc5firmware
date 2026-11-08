@@ -630,11 +630,11 @@ def _mesh_printer(objects=(), tower=True):
     ("fixed", ["BED_MESH_CLEAR", "_FF_MESH_FIXED"]),
     ("adaptive", ["BED_MESH_CLEAR", "_FF_MESH_ADAPTIVE"]),
     ("auto", ["BED_MESH_CLEAR",
-              "THERMAL_MESH_APPLY PREPARE=0 METHOD=bilinear MATCH=absolute"
+              "THERMAL_MESH_APPLY PREPARE=0 METHOD=model MATCH=absolute"
               " CORRECT=none MAX_RMS=0.05 FALLBACK=NONE",
               "_FF_MESH_THERMAL_OR_ADAPTIVE"]),
     ("thermal", ["BED_MESH_CLEAR",
-                 "THERMAL_MESH_APPLY PREPARE=0 METHOD=bilinear MATCH=absolute"
+                 "THERMAL_MESH_APPLY PREPARE=0 METHOD=model MATCH=absolute"
                  " CORRECT=none FALLBACK=NONE",
                  "_FF_MESH_THERMAL_OR_FIXED"]),
 ])
@@ -674,7 +674,7 @@ def test_a_file_without_labelled_objects_gets_the_thermal_mesh(model,
     out, info = _render_one(model, "_FF_MESH_ADAPTIVE_PROBE", {},
                             extra=_mesh_printer(objects=objects))
     # No MAX_RMS: however far off, and the fixed mesh only without a map.
-    assert out == ["THERMAL_MESH_APPLY PREPARE=0 METHOD=bilinear "
+    assert out == ["THERMAL_MESH_APPLY PREPARE=0 METHOD=model "
                    "MATCH=absolute CORRECT=none FALLBACK=NONE REUSE_PROBE=1",
                    "_FF_MESH_THERMAL_OR_FIXED"]
     assert "using the thermal mesh" in info[0]

@@ -93,14 +93,20 @@ def test_steps_always_end_on_the_maximum(tm):
         tm.temperature_steps(100, 60, 10)
 
 
-def test_the_bed_snakes_up_and_down_as_the_chamber_climbs(tm):
-    plan = tm.sweep_plan([60., 80., 100.], [30., 40., 50.])
-    assert plan == [(30., 60.), (30., 80.), (30., 100.),
-                    (40., 100.), (40., 80.), (40., 60.),
-                    (50., 60.), (50., 80.), (50., 100.)]
-    # Every step changes exactly one heater.
+def test_the_sweep_runs_hottest_first_and_never_puts_the_bed_below_the_chamber(
+        tm):
+    plan = tm.sweep_plan([40., 60., 80.], [30., 50., 70.])
+    assert plan == [(70., 80.),
+                    (50., 80.), (50., 60.),
+                    (30., 80.), (30., 60.), (30., 40.)]
+    # Within a set the bed only ever goes down.
     for (c1, b1), (c2, b2) in zip(plan, plan[1:]):
-        assert (c1 != c2) + (b1 != b2) == 1
+        assert c2 < c1 or (c2 == c1 and b2 < b1)
+
+
+def test_an_unheated_chamber_keeps_every_bed_target(tm):
+    assert tm.sweep_plan([60., 80.], [0.]) == [(0., 80.), (0., 60.)]
+    assert tm.sweep_plan([40.], [50.]) == []
 
 
 def test_convergence_uses_the_mean_absolute_difference(tm):
@@ -120,33 +126,144 @@ def test_each_axis_finds_the_nodes_it_moves(tm):
     assert chamber_map[2][2] == pytest.approx(0.0021)
 
 
-def test_four_points_alternate_axes_and_keep_apart(tm):
-    chamber_map, bed_map = tm.sensitivity_maps(mesh_map(tm))
-    points = tm.select_points(PARAMS, chamber_map, bed_map, 2, 2, 60.)
-    assert [p["axis"] for p in points] == ["chamber", "bed", "chamber", "bed"]
-    assert (points[0]["x"], points[0]["y"]) == (100., 100.)
-    assert points[1]["x"] == 200.
+def test_four_points_keep_apart_and_pin_down_both_temperatures(tm):
+    model = tm.thermal_model(mesh_map(tm))
+    points = tm.select_points(PARAMS, model, 4, 60.)
+    assert len(points) == 4
+    assert {p["axis"] for p in points} == {"chamber", "bed"}
     for i, p in enumerate(points):
         for q in points[i + 1:]:
             assert ((p["x"] - q["x"]) ** 2 + (p["y"] - q["y"]) ** 2) ** .5 >= 60.
+    # The bed tilts toward +X while the chamber bows the middle: the points
+    # see the two as clearly different shapes.
+    assert tm.point_separation(model, points) < 0.9
 
 
 def test_a_single_chamber_target_gives_every_point_to_the_bed(tm):
     entries = mesh_map(tm, chambers=(0.,))
     chamber_map, bed_map = tm.sensitivity_maps(entries)
     assert chamber_map is None
-    points = tm.select_points(PARAMS, chamber_map, bed_map, 2, 2, 60.)
+    model = tm.thermal_model(entries)
+    points = tm.select_points(PARAMS, model, 4, 60.)
     assert len(points) == 4 and {p["axis"] for p in points} == {"bed"}
+    assert tm.point_separation(model, points) is None
 
 
 def test_spacing_relaxes_rather_than_returning_too_few(tm):
-    chamber_map, bed_map = tm.sensitivity_maps(mesh_map(tm))
-    points = tm.select_points(PARAMS, chamber_map, bed_map, 2, 2, 1000.)
-    assert len(points) == 4
+    model = tm.thermal_model(mesh_map(tm))
+    assert len(tm.select_points(PARAMS, model, 4, 1000.)) == 4
+
+
+# A plate where the bed and the chamber both bow the middle, and differ only
+# in that the chamber also lifts the -Y edge a little.
+def twin_shape(chamber, bed, x, y):
+    bow = 1. - ((x - 100.) ** 2 + (y - 100.) ** 2) / 20000.
+    return 0.002 * bed * bow + 0.002 * chamber * bow + \
+        0.0005 * chamber * (1. - y / 200.)
+
+
+def twin_map(chambers=(30., 40., 50.), beds=(60., 80., 100.)):
+    return [{"chamber": c, "bed": b,
+             "matrix": [[twin_shape(c, b, col * 50., r * 50.)
+                         for col in range(5)] for r in range(5)]}
+            for c in chambers for b in beds]
+
+
+def test_points_are_chosen_to_separate_heaters_that_bow_alike(tm):
+    model = tm.thermal_model(twin_map())
+    chosen = tm.select_points(PARAMS, model, 4, 60.)
+    # The most sensitive nodes for each heater are all near the middle,
+    # where the two look the same; picking by sensitivity alone cannot
+    # tell a hot bed from a warm chamber.
+    by_sens = []
+    for axis in ("chamber", "bed", "chamber", "bed"):
+        ranked = sorted(((abs(model[axis][r][c]), r, c) for r in range(5)
+                         for c in range(5)), reverse=True)
+        for _, r, c in ranked:
+            x, y = tm.node_xy(PARAMS, r, c)
+            if all(((x - p["x"]) ** 2 + (y - p["y"]) ** 2) ** .5 >= 60.
+                   for p in by_sens):
+                by_sens.append({"x": x, "y": y, "row": r, "col": c})
+                break
+    assert tm.point_separation(model, chosen) < \
+        tm.point_separation(model, by_sens)
+    # And with them the fit recovers both temperatures.
+    measured = [twin_shape(42., 75., p["x"], p["y"]) for p in chosen]
+    bed, chamber = tm.fit_model(model, chosen, measured)
+    assert (bed, chamber) == (pytest.approx(75., abs=0.01),
+                              pytest.approx(42., abs=0.01))
+
+
+def test_the_model_uses_measured_temperatures_to_decouple_the_heaters(tm):
+    # A hot bed warms the chamber: the chamber read 0.2 degC above its
+    # target for every degree of bed above 60. The warp follows the real
+    # temperatures. By targets alone, the chamber's share would be blamed
+    # on the bed.
+    entries = []
+    for c in (30., 40., 50.):
+        for b in (60., 80., 100.):
+            real_c = c + 0.2 * (b - 60.)
+            entries.append({
+                "chamber": c, "bed": b, "bed_measured": [b, b],
+                "chamber_measured": [real_c - .1, real_c + .1],
+                "matrix": matrix_at(real_c, b)})
+    model = tm.thermal_model(entries)
+    truth_c = [[(matrix_at(1., 0.)[r][c] - matrix_at(0., 0.)[r][c])
+                for c in range(5)] for r in range(5)]
+    truth_b = [[(matrix_at(0., 1.)[r][c] - matrix_at(0., 0.)[r][c])
+                for c in range(5)] for r in range(5)]
+    for r in range(5):
+        for c in range(5):
+            assert model["chamber"][r][c] == pytest.approx(truth_c[r][c])
+            assert model["bed"][r][c] == pytest.approx(truth_b[r][c])
+    assert model["fit_rms"] == pytest.approx(0., abs=1e-9)
+
+
+def test_heaters_that_moved_in_lockstep_cannot_be_separated(tm):
+    entries = [{"chamber": c, "bed": c + 30., "matrix": matrix_at(c, c + 30.)}
+               for c in (30., 40., 50.)]
+    with pytest.raises(ValueError, match="cannot separate"):
+        tm.thermal_model(entries)
+
+
+def test_the_model_fits_a_triangular_map_up_to_its_diagonal(tm):
+    # Bed never below chamber: no full cell touches (60, 60), but the model
+    # does not need one.
+    beds, chambers = [40., 50., 60.], [30., 45., 60.]
+    entries = [{"chamber": c, "bed": b, "matrix": matrix_at(c, b)}
+               for c, b in tm.sweep_plan(beds, chambers)]
+    assert (60., 40.) not in {(e["chamber"], e["bed"]) for e in entries}
+    model = tm.thermal_model(entries)
+    points = tm.select_points(PARAMS, model)
+    measured = [bed_shape(57., 58., p["x"], p["y"]) for p in points]
+    bed, chamber = tm.fit_model(model, points, measured)
+    assert (bed, chamber) == (pytest.approx(58., abs=0.01),
+                              pytest.approx(57., abs=0.01))
+    matrix, weights = tm.model_mesh(model, entries, bed, chamber)
+    truth = matrix_at(57., 58.)
+    for r in range(5):
+        for c in range(5):
+            assert matrix[r][c] == pytest.approx(truth[r][c], abs=1e-6)
+
+
+def test_the_model_mesh_keeps_what_the_straight_line_misses(tm):
+    # A bed whose bow grows with the square of the bed temperature.
+    def curved(chamber, bed):
+        return [[v + 1e-5 * (bed - 60.) ** 2 * (r == 2 and c == 2)
+                 for c, v in enumerate(row)]
+                for r, row in enumerate(matrix_at(chamber, bed))]
+    entries = [{"chamber": c, "bed": b, "matrix": curved(c, b)}
+               for c in (30., 40., 50.) for b in (60., 80., 100.)]
+    model = tm.thermal_model(entries)
+    assert model["fit_rms"] > 0.
+    # At a sampled state the departures bring the exact entry back.
+    matrix, weights = tm.model_mesh(model, entries, 80., 40.)
+    assert len(weights) == 1
+    assert matrix[2][2] == pytest.approx(curved(40., 80.)[2][2])
 
 
 def points_for(tm, entries):
-    return tm.select_points(PARAMS, *tm.sensitivity_maps(entries))
+    return tm.select_points(PARAMS, tm.thermal_model(entries))
 
 
 def test_nearest_finds_the_sampled_pair(tm):
@@ -464,6 +581,77 @@ def test_the_sweep_maps_every_pair_until_it_settles(tm, tmp_path):
     assert printer.gcode.scripts[-1] == "SET_IDLE_TIMEOUT TIMEOUT=600"
 
 
+def _sweep(tm, tmp_path, printer=None, **params):
+    printer = printer or SweepPrinter()
+    obj = tm.FFThermalMesh(Config(printer,
+                                  data_file=str(tmp_path / "thermal_mesh.json"),
+                                  max_samples=6, min_point_spacing=60.,
+                                  bed_tolerance=1., chamber_tolerance=2.,
+                                  heat_timeout=100., cool_timeout=3600.))
+    printer.handlers["klippy:connect"]()
+    soaks = []
+    sleep = obj._sleep
+    obj._sleep = lambda seconds: soaks.append(seconds) or sleep(seconds)
+    printer.gcode.commands["THERMAL_MESH_SWEEP"](Gcmd(**params))
+    data = json.loads((tmp_path / "thermal_mesh.json").read_text())
+    return obj, printer, data, soaks
+
+
+def test_the_chamber_soaks_once_and_each_set_starts_with_a_long_bed_soak(
+        tm, tmp_path):
+    obj, printer, data, soaks = _sweep(
+        tm, tmp_path, BED_MIN=60, BED_MAX=100, BED_STEP=20, CHAMBER_MIN=30,
+        CHAMBER_MAX=50, CHAMBER_STEP=10, SOAK=300, MAX_SOAK=1200,
+        CHAMBER_SOAK=3000, THRESHOLD=0.01)
+    assert obj.status["state"] == "done", obj.status
+    assert [(e["chamber"], e["bed"]) for e in data["entries"]] == [
+        (50., 100.), (50., 80.), (50., 60.),
+        (40., 100.), (40., 80.), (40., 60.),
+        (30., 100.), (30., 80.), (30., 60.)]
+    assert soaks == [3000., 300., 300.,
+                     1200., 300., 300.,
+                     1200., 300., 300.]
+
+
+class SlowChamber(Heater):
+    """Heats at once but cannot fall below `floor` (a warm enclosure)."""
+
+    def __init__(self, floor):
+        super().__init__()
+        self.floor = floor
+
+    def get_status(self, eventtime):
+        return {"temperature": max(self.target, self.floor)}
+
+
+def test_a_chamber_that_will_not_cool_skips_its_set(tm, tmp_path):
+    printer = SweepPrinter()
+    printer.heaters["chamber_heater"] = SlowChamber(floor=45.)
+    obj, printer, data, soaks = _sweep(
+        tm, tmp_path, printer, BED_MIN=60, BED_MAX=80, BED_STEP=20,
+        CHAMBER_MIN=30, CHAMBER_MAX=50, CHAMBER_STEP=10, SOAK=0,
+        MAX_SOAK=0, CHAMBER_SOAK=0, COOL_TIMEOUT=600, THRESHOLD=0.01)
+    assert obj.status["state"] == "done", obj.status
+    assert {e["chamber"] for e in data["entries"]} == {50.}
+    assert [(k["chamber"], k["bed"]) for k in data["skipped"]] == [
+        (40., None), (30., None)]
+    assert "did not cool" in data["skipped"][0]["reason"]
+    # The bed was off while it tried.
+    assert "SET_HEATER_TEMPERATURE HEATER=heater_bed TARGET=0.0" in \
+        printer.gcode.scripts
+
+
+def test_a_bed_target_below_the_measured_chamber_is_skipped(tm, tmp_path):
+    # Unheated chamber (target 0) that the enclosure holds at 65.
+    printer = SweepPrinter()
+    printer.heaters["chamber_heater"] = SlowChamber(floor=65.)
+    obj, printer, data, soaks = _sweep(
+        tm, tmp_path, printer, BED_MIN=60, BED_MAX=100, BED_STEP=20,
+        SOAK=0, MAX_SOAK=0, CHAMBER_SOAK=0, THRESHOLD=0.01)
+    assert [e["bed"] for e in data["entries"]] == [100., 80.]
+    assert [(k["chamber"], k["bed"]) for k in data["skipped"]] == [(0., 60.)]
+
+
 def test_a_resumed_sweep_skips_the_stored_pairs(tm, tmp_path):
     path = tmp_path / "thermal_mesh.json"
     stored = mesh_map(tm, chambers=(30.,), beds=(60., 80.))
@@ -511,7 +699,7 @@ def test_bilinear_apply_empties_the_queue_then_yields_while_it_fits(
     printer.handlers["klippy:connect"]()
     obj.probe_helper.z_at = lambda x, y: bed_shape(45., 70., x, y)
 
-    gcmd = Gcmd(DRY_RUN=1)
+    gcmd = Gcmd(METHOD="bilinear", DRY_RUN=1)
     printer.gcode.commands["THERMAL_MESH_APPLY"](gcmd)
 
     # Nothing queued while Python works, and the reactor runs once per

@@ -34,13 +34,19 @@ both printer models or through every real-world workflow.
   needs no `ADAPTIVE_MESH` call, and it runs before the first tool's clean.
   Every print says which mesh and strategy it uses. The flow mesh keeps its
   own `FLOW_MESH_TOGGLE`.
-- Thermal mesh map: `THERMAL_MESH_SWEEP` probes full meshes at every bed and
-  chamber temperature pair in a range (serpentine order, heat-soaked, repeated
-  until two agree within a threshold) and stores them in `thermal_mesh.json`;
-  `THERMAL_MESH_ANALYZE` finds the four mesh points most sensitive to each
-  temperature; `THERMAL_MESH_APPLY` probes only those and loads a mesh
-  interpolated from the closest matches (`bilinear`, `idw`, `nearest`, or
-  `temperature` without probing). Not used unless called. See
+- Thermal mesh map: `THERMAL_MESH_SWEEP` probes full meshes over a range of
+  bed and chamber temperatures, hottest chamber first and the bed from
+  hottest down within each, never with the bed below the chamber. The
+  chamber is soaked once; each lower chamber set waits for it to cool and is
+  skipped if it does not within `COOL_TIMEOUT`; the first bed step of each set
+  soaks longer (`MAX_SOAK`). Each pair is repeated until two meshes agree
+  within a threshold and stored in `thermal_mesh.json` with the temperatures
+  measured around it. `THERMAL_MESH_ANALYZE` fits, per mesh node, the bed's
+  and the chamber's warp separately against those measured temperatures, and
+  picks the four points that best tell the two apart; `THERMAL_MESH_APPLY`
+  probes only those, solves for the bed and chamber state that fits them and
+  loads that mesh (`model`; also `bilinear`, `idw`, `nearest`, or
+  `temperature` without probing). See
   [the thermal mesh page](docs/thermal-mesh.md).
 - A bed-collision guard. Klipper did not know where the bed was, so a jog, a
   macro or a typed `G1` could drive the nozzle, or the carriage with no tool
