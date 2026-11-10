@@ -586,6 +586,7 @@ class SweepPrinter(Printer):
         self.clock = Clock()
         self.heaters = {"heater_bed": Heater(), "chamber_heater": Heater()}
         self.probes = []
+        self.ratio, self.mesh_seconds = 4., 100.
         self.gcode.run_script = self.run_script
 
     def get_reactor(self):
@@ -619,7 +620,8 @@ class SweepPrinter(Printer):
             key = (c, b)
             n = sum(1 for k in self.probes if k == key)
             self.probes.append(key)
-            drift = 0.05 / (4 ** n)          # quarters with every sample
+            drift = 0.05 / (self.ratio ** n)  # quarters with every sample
+            self.clock.t += self.mesh_seconds
             m = [[z + drift for z in row] for row in matrix_at(c, b)]
             self.bed_mesh.mesh = types.SimpleNamespace(
                 get_probed_matrix=lambda: m,
@@ -662,11 +664,12 @@ def test_the_sweep_maps_every_pair_until_it_settles(tm, tmp_path):
     assert printer.gcode.scripts[-1] == "SET_IDLE_TIMEOUT TIMEOUT=600"
 
 
-def _sweep(tm, tmp_path, printer=None, **params):
+def _sweep(tm, tmp_path, printer=None, max_samples=6, **params):
     printer = printer or SweepPrinter()
     obj = tm.FFThermalMesh(Config(printer,
                                   data_file=str(tmp_path / "thermal_mesh.json"),
-                                  max_samples=6, min_point_spacing=60.,
+                                  max_samples=max_samples,
+                                  min_point_spacing=60.,
                                   bed_tolerance=1., chamber_tolerance=2.,
                                   heat_timeout=100., cool_timeout=3600.))
     printer.handlers["klippy:connect"]()
@@ -693,6 +696,26 @@ def test_the_chamber_soaks_once_and_each_set_starts_with_a_long_bed_soak(
     assert soaks == [3000., 300., 300.,
                      1200., 300., 300.,
                      1200., 300., 300.]
+    # Verified on meshes 4 and 5; three 100 s meshes went before the 4th.
+    assert [e["soak_time"] for e in data["entries"]] == [
+        s + 300. for s in soaks]
+
+
+def test_without_a_limit_it_verifies_for_as_long_as_it_takes(tm, tmp_path):
+    printer = SweepPrinter()
+    printer.ratio = 1.5                  # a plate that settles slowly
+    obj, printer, data, soaks = _sweep(
+        tm, tmp_path, printer, max_samples=0, BED_MIN=60, BED_MAX=60,
+        SOAK=0, MAX_SOAK=0, CHAMBER_SOAK=600)
+    (entry,) = data["entries"]
+    assert entry["converged"] and entry["samples"] > 6
+    assert entry["soak_time"] == 600. + 100. * (entry["samples"] - 2)
+
+
+def test_max_samples_of_one_is_refused(tm, tmp_path):
+    with pytest.raises(RuntimeError, match="max_samples"):
+        tm.FFThermalMesh(Config(SweepPrinter(), max_samples=1,
+                                data_file=str(tmp_path / "m.json")))
 
 
 class SlowChamber(Heater):

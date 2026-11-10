@@ -69,9 +69,22 @@ grid; the analysis below does not need a full grid.
 At every pair it waits for the bed (±`bed_tolerance`) and the chamber (at
 least target − `chamber_tolerance`; a hot bed may carry the chamber past its
 target, which is recorded rather than waited out), soaks, then probes full
-meshes until one verifies the one before it (next section), and stores their
-average. After `max_samples` it stores the last two anyway and marks the pair
-`"converged": false`. If a heater does not reach its target within
+meshes until one verifies the one before it (next section), however many
+that takes; `THERMAL_MESH_ABORT` stops it. It stores the average of the
+verified pair: at every node, the plain mean of the two heights. Both are
+equally good readings of the same plate, so their mean is the best estimate
+and halves the noise variance; an rms would throw away the sign of a node
+below zero. With `max_samples` set, it stops after that many meshes,
+stores the last two anyway and marks the pair `"converged": false`.
+
+Each entry also records `"soak_time"`: seconds from both heaters reaching
+their targets to the start of the first mesh of the verified pair — how long
+the plate at that pair actually took to stop moving, including the fixed
+soak and every mesh that failed. If it comes out well above `SOAK` or
+`MAX_SOAK`, those are too short and the sweep is paying for it in extra
+meshes; if verification always passes on the first try, they may be longer
+than needed. The bed and chamber readings stored with it are taken at the
+start of that same mesh and at the end of the verification. If a heater does not reach its target within
 `heat_timeout` the sweep stops; fix the cause and run it again with `RESUME=1`.
 
 ### Verifying a mesh
@@ -285,7 +298,7 @@ section with just that option at the end of `printer.cfg`.
 | `chamber_tolerance` | 2.0 | °C below the chamber target. |
 | `heat_timeout` | 5400 | Seconds to reach a pair's targets before the sweep stops. |
 | `cool_timeout` | 3600 | Seconds the chamber has to cool to a lower target before that set is skipped (`COOL_TIMEOUT`). |
-| `max_samples` | 6 | Full meshes per pair at most. |
+| `max_samples` | 0 | Full meshes per pair at most; 0 keeps going until two verify. |
 | `precision_samples` | 10 | Touches at the middle of the mesh after each verification mesh, to measure σ. |
 | `confidence` | 0.95 | `CONFIDENCE`'s default. |
 | `max_probe_sigma` | 0.01 | `MAX_SIGMA`'s default, mm. |

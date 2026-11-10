@@ -808,7 +808,11 @@ class FFThermalMesh:
             'chamber_tolerance', 2., above=0.)
         self.heat_timeout = config.getfloat('heat_timeout', 5400., above=0.)
         self.cool_timeout = config.getfloat('cool_timeout', 3600., above=0.)
-        self.max_samples = config.getint('max_samples', 6, minval=2)
+        # 0: keep verifying until a pair of meshes passes (ABORT stops it).
+        self.max_samples = config.getint('max_samples', 0, minval=0)
+        if self.max_samples == 1:
+            raise config.error("ff_thermal_mesh: max_samples is 0 (no limit) "
+                               "or at least 2: a mesh needs one to verify it")
         self.precision_samples = config.getint('precision_samples', 10,
                                                minval=3)
         self.confidence = config.getfloat('confidence', 0.95, minval=0.5,
@@ -1049,7 +1053,7 @@ class FFThermalMesh:
                                    "nothing")
         return sample_std(self._precision)
 
-    def _sample_until_stable(self, data, job):
+    def _sample_until_stable(self, data, job, reached):
         """Probe meshes until one verifies the one before it.
 
         Each mesh after the first is a verification of the previous one:
@@ -1057,19 +1061,30 @@ class FFThermalMesh:
         passes when verify_meshes finds them identical at job['confidence']
         -- average error indistinguishable from 0 and every node within the
         probe's noise -- and the probe itself is no noisier than
-        job['max_sigma']. The two are averaged and stored.
+        job['max_sigma']. It goes on until a pair passes; max_samples, if
+        set, caps it and keeps the last two unverified.
+
+        `reached` is when both heaters reached their targets. Returns a dict:
+        matrix (the node-by-node mean of the verified pair), samples, check,
+        converged, soak_time (seconds from `reached` to the start of the
+        first mesh of the pair: how long this pair needed to settle), and
+        the bed and chamber readings at that start and at the end.
         """
-        previous, check = None, None
-        for n in range(1, self.max_samples + 1):
+        previous, check, n = None, None, 0
+        while not self.max_samples or n < self.max_samples:
+            n += 1
             self._check_abort()
             self.status['samples'] = n
+            now = self.reactor.monotonic()
+            start = {'time': now, 'bed': self._bed_temp(now),
+                     'chamber': self._chamber_temp(now)}
             matrix, params = self._probe_full_mesh()
             self._check_params(data, params)
             if previous is not None:
                 self.status['phase'] = 'verifying'
                 sigma, dof = self._measure_precision(data['mesh_params'])
                 check = verify_meshes(
-                    previous, matrix, sigma, dof, job['confidence'],
+                    previous[0], matrix, sigma, dof, job['confidence'],
                     self._zero_ref()[0] != bed_mesh_module.ZrefMode.DISABLED)
                 check['sigma_ok'] = sigma <= job['max_sigma']
                 self.status.update(phase='sampling', last_delta=check['mean'],
@@ -1089,13 +1104,22 @@ class FFThermalMesh:
                        check['shape_limit'], verdict,
                        job['confidence'] * 100.))
                 if check['identical'] and check['sigma_ok']:
-                    return average_matrices([previous, matrix]), n, check, \
-                        True
-            previous = matrix
-        self.gcode.respond_info(
-            "thermal mesh: chamber %.1f bed %.1f did not verify in %d samples; "
-            "keeping the last two" % (job['chamber'], job['bed'], n))
-        return average_matrices([previous, matrix]), n, check, False
+                    break
+            previous = (matrix, start)
+        else:
+            self.gcode.respond_info(
+                "thermal mesh: chamber %.1f bed %.1f did not verify in %d "
+                "samples; keeping the last two unverified"
+                % (job['chamber'], job['bed'], n))
+        converged = bool(check and check['identical'] and check['sigma_ok'])
+        first = previous[1]
+        now = self.reactor.monotonic()
+        return {'matrix': average_matrices([previous[0], matrix]),
+                'samples': n, 'check': check, 'converged': converged,
+                'soak_time': first['time'] - reached,
+                'bed_measured': [first['bed'], self._bed_temp(now)],
+                'chamber_measured': [first['chamber'],
+                                     self._chamber_temp(now)]}
 
     def _set_idle_timeout(self, value):
         self.gcode.run_script('SET_IDLE_TIMEOUT TIMEOUT=%.0f' % (value,))
@@ -1160,6 +1184,7 @@ class FFThermalMesh:
                     continue
                 self._set_bed(bed)
                 self._wait_for_temps(bed, chamber)
+                reached = self.reactor.monotonic()
                 self.status['phase'] = 'soaking'
                 if first:
                     soak = max(job['chamber_soak'], job['max_soak'])
@@ -1170,21 +1195,24 @@ class FFThermalMesh:
                 self._sleep(soak)
                 first, set_started = False, True
                 self.status['phase'] = 'sampling'
-                now = self.reactor.monotonic()
-                bed_start, ch_start = self._bed_temp(now), \
-                    self._chamber_temp(now)
-                matrix, samples, check, converged = self._sample_until_stable(
-                    data, job)
-                now = self.reactor.monotonic()
+                got = self._sample_until_stable(data, job, reached)
+                check = got['check']
                 data['entries'].append({
                     'chamber': chamber, 'bed': bed,
-                    'bed_measured': [bed_start, self._bed_temp(now)],
-                    'chamber_measured': [ch_start, self._chamber_temp(now)],
-                    'samples': samples,
+                    'bed_measured': got['bed_measured'],
+                    'chamber_measured': got['chamber_measured'],
+                    'samples': got['samples'],
+                    'soak_time': got['soak_time'],
                     'delta': None if check is None else check['mean'],
                     'verification': check,
-                    'converged': converged, 'matrix': matrix})
+                    'converged': got['converged'], 'matrix': got['matrix']})
                 self._save(data)
+                self.gcode.respond_info(
+                    "thermal mesh: chamber %.1f bed %.1f %s after %d meshes; "
+                    "settled %.0f min after reaching temperature"
+                    % (chamber, bed, 'verified' if got['converged']
+                       else 'NOT verified', got['samples'],
+                       got['soak_time'] / 60.))
             try:
                 if self._analyze(data, job['points'], self.min_spacing,
                                  report=True) is None:

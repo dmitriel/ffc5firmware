@@ -42,7 +42,9 @@ both printer models or through every real-world workflow.
   soaks longer (`MAX_SOAK`). Each pair is probed until a mesh verifies the one
   before it: the probe's precision is measured right after, and the two must
   be identical at 95 % confidence -- average error statistically 0 and every
-  node within the probe's noise. The pair is then stored in `thermal_mesh.json` with the temperatures
+  node within the probe's noise -- as many meshes as that takes. The pair's
+  node-by-node mean is then stored, with how long after reaching temperature
+  it settled (`soak_time`), in `thermal_mesh.json` with the temperatures
   measured around it. `THERMAL_MESH_ANALYZE` fits, per mesh node, the bed's
   and the chamber's warp separately against those measured temperatures, and
   picks the four points that best tell the two apart; `THERMAL_MESH_APPLY`
