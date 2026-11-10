@@ -8,6 +8,14 @@ both printer models or through every real-world workflow.
 
 ### Added
 
+- Tool remapping, before or during a print: `ASSIGN_TOOL TOOL=T2 N=0` makes
+  the file's `T0` -- its tool changes, its `M104`/`M109 T0` and
+  `START_PRINT`'s tool list -- use the head in dock 3, with
+  klipper-toolchanger's rules, so HelixScreen's tool mapping works. While
+  paused, `RESUME` heats each tool to the temperature of the number it now
+  has and swaps in the tool behind the paused number. Not yet tested on
+  hardware. See [Remapping tools](docs/printing.md#remapping-tools).
+
 - Flow mesh, a second bed-mesh strategy: the nozzle stays on the flat sliced
   plane and the first layers absorb the plate's unevenness in their
   thickness, with extrusion scaled to match. A layer is never laid thinner
@@ -122,11 +130,9 @@ both printer models or through every real-world workflow.
   the carriage and skipped picking it up again, so it travelled to the purge
   chute and fed filament with no tool on. It now picks the tool back up after
   homing.
-- `ASSIGN_TOOL` with a tool's own number (`TOOL=T2 N=2`) is accepted as the
-  no-op it is, instead of failing; that is what HelixScreen sends to reset its
-  tool mapping. Any other `ASSIGN_TOOL` is still refused, and the error now
-  says that HelixScreen keeps showing the remap anyway -- see
-  [Known issues](docs/known-issues.md).
+- HelixScreen no longer shows the wrong tool as active after you remap a
+  tool there. It kept its remap even though the printer refused it; the
+  printer now carries the remap out (see Added).
 - `RESUME` after a `PURGE`, `LOAD_FILAMENT` or `UNLOAD_FILAMENT` during a
   pause no longer drives the mounted tool into a docked one. Those macros
   leave the head at the purge chute or the wipe spot, beside the docks, and
