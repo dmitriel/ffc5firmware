@@ -14,8 +14,9 @@ THREE STAGES
    around it), so the bed only ever cools between pairs. The chamber is soaked
    once, at the start. Each later chamber set first waits for the chamber to
    cool to its lower target -- there is no active cooling -- and is skipped if
-   it has not within COOL_TIMEOUT. The first bed step of every set soaks for
-   MAX_SOAK; every other one waits SOAK, 0 by default. At each pair it then probes full meshes,
+   it has not within COOL_TIMEOUT; CHAMBER_STEP_SOAK (0 by default) adds a
+   chamber soak there. The first bed step of every set soaks for MAX_SOAK
+   (or CHAMBER_STEP_SOAK, if longer), every other one for SOAK. At each pair it then probes full meshes,
    each one verifying the one before: the probe's precision is measured right
    after it, and the two must be identical at CONFIDENCE (verify_meshes:
    average error statistically 0, every node within the probe's noise). The
@@ -1189,7 +1190,9 @@ class FFThermalMesh:
                 if first:
                     soak = max(job['chamber_soak'], job['max_soak'])
                 elif not set_started:
-                    soak = job['max_soak']
+                    # A later chamber set: the long bed soak, or the
+                    # optional per-step chamber soak if that is longer.
+                    soak = max(job['max_soak'], job['chamber_step_soak'])
                 else:
                     soak = job['soak']
                 self._sleep(soak)
@@ -1266,11 +1269,11 @@ class FFThermalMesh:
         ch_min = gcmd.get_float('CHAMBER_MIN', 0., minval=0.)
         ch_max = gcmd.get_float('CHAMBER_MAX', ch_min)
         ch_step = gcmd.get_float('CHAMBER_STEP', 10., above=0.)
-        # Off by default: the meshes are verified until the plate has
-        # settled, so a fixed wait between bed steps is optional.
-        soak = gcmd.get_float('SOAK', 0., minval=0.)
-        max_soak = gcmd.get_float('MAX_SOAK', 1800., minval=0.)
+        soak = gcmd.get_float('SOAK', 600., minval=0.)
+        max_soak = gcmd.get_float('MAX_SOAK', max(soak, 1800.), minval=0.)
         chamber_soak = gcmd.get_float('CHAMBER_SOAK', 3600., minval=0.)
+        # Optional: a chamber soak at every later chamber step too.
+        chamber_step_soak = gcmd.get_float('CHAMBER_STEP_SOAK', 0., minval=0.)
         cool_timeout = gcmd.get_float('COOL_TIMEOUT', self.cool_timeout,
                                       above=0.)
         confidence = gcmd.get_float('CONFIDENCE', self.confidence,
@@ -1289,6 +1292,7 @@ class FFThermalMesh:
                              % (self.chamber_heater,))
         sweep = {'bed_temps': beds, 'chamber_temps': chambers, 'soak': soak,
                  'max_soak': max_soak, 'chamber_soak': chamber_soak,
+                 'chamber_step_soak': chamber_step_soak,
                  'cool_timeout': cool_timeout, 'confidence': confidence,
                  'max_sigma': max_sigma}
         data = self._load() if resume else None
@@ -1309,6 +1313,7 @@ class FFThermalMesh:
         self.job = {'plan': plan, 'data': data, 'abort': False,
                     'soak': soak, 'max_soak': max_soak,
                     'chamber_soak': chamber_soak,
+                    'chamber_step_soak': chamber_step_soak,
                     'cool_timeout': cool_timeout, 'confidence': confidence,
                     'max_sigma': max_sigma,
                     'keep_heat': gcmd.get_int('KEEP_HEAT', 0),
@@ -1319,14 +1324,14 @@ class FFThermalMesh:
         stored = len(data['entries'])
         gcmd.respond_info(
             "thermal mesh: %d pairs (chamber %s x bed %s, hottest first, bed "
-            "never below chamber), %d already stored; chamber soak %ds once, "
-            "soak %ds at each set's hottest bed and %ds per bed step, "
+            "never below chamber), %d already stored; chamber soak %ds once "
+            "and %ds per chamber step, soak %ds at each set's hottest bed and %ds per bed step, "
             "cool-down limit %ds, meshes verified identical at %.0f%% "
             "(probe sigma <= %.4f mm). "
             "THERMAL_MESH_STATUS to follow, THERMAL_MESH_ABORT to stop."
             % (len(plan), _fmt_list(list(reversed(chambers))),
                _fmt_list(list(reversed(beds))), stored, chamber_soak,
-               max_soak, soak, cool_timeout, confidence * 100., max_sigma))
+               chamber_step_soak, max_soak, soak, cool_timeout, confidence * 100., max_sigma))
         self.reactor.register_callback(self._run_sweep)
 
     cmd_THERMAL_MESH_ABORT_help = "Stop a running thermal mesh sweep"

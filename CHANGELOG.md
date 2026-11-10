@@ -37,10 +37,10 @@ both printer models or through every real-world workflow.
 - Thermal mesh map: `THERMAL_MESH_SWEEP` probes full meshes over a range of
   bed and chamber temperatures, hottest chamber first and the bed from
   hottest down within each, never with the bed below the chamber. The
-  chamber is soaked once; each lower chamber set waits for it to cool and is
+  chamber is soaked once (and at every chamber step if `CHAMBER_STEP_SOAK`
+  is set); each lower chamber set waits for it to cool and is
   skipped if it does not within `COOL_TIMEOUT`; the first bed step of each set
-  soaks (`MAX_SOAK`); later bed steps go straight to probing unless `SOAK`
-  is set. Each pair is probed until a mesh verifies the one
+  soaks longer (`MAX_SOAK`). Each pair is probed until a mesh verifies the one
   before it: the probe's precision is measured right after, and the two must
   be identical at 95 % confidence -- average error statistically 0 and every
   node within the probe's noise -- as many meshes as that takes. The pair's

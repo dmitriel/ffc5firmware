@@ -666,6 +666,7 @@ def test_the_sweep_maps_every_pair_until_it_settles(tm, tmp_path):
 
 def _sweep(tm, tmp_path, printer=None, max_samples=6, **params):
     printer = printer or SweepPrinter()
+    tmp_path.mkdir(parents=True, exist_ok=True)
     obj = tm.FFThermalMesh(Config(printer,
                                   data_file=str(tmp_path / "thermal_mesh.json"),
                                   max_samples=max_samples,
@@ -984,8 +985,12 @@ def test_a_shared_reference_touch_widens_the_average_test(tm):
                             shared_reference=True)["identical"]
 
 
-def test_bed_steps_after_the_first_do_not_soak_by_default(tm, tmp_path):
-    obj, printer, data, soaks = _sweep(
-        tm, tmp_path, BED_MIN=60, BED_MAX=100, BED_STEP=20, CHAMBER_MIN=30,
-        CHAMBER_MAX=40, CHAMBER_STEP=10)
-    assert soaks == [3600., 0., 0., 1800., 0., 0.]
+def test_a_chamber_soak_at_every_chamber_step_is_optional(tm, tmp_path):
+    params = dict(BED_MIN=60, BED_MAX=100, BED_STEP=20, CHAMBER_MIN=30,
+                  CHAMBER_MAX=40, CHAMBER_STEP=10, SOAK=300, MAX_SOAK=1200,
+                  CHAMBER_SOAK=3000)
+    _, _, _, soaks = _sweep(tm, tmp_path / "off", **params)
+    assert soaks == [3000., 300., 300., 1200., 300., 300.]
+    _, _, _, soaks = _sweep(tm, tmp_path / "on", CHAMBER_STEP_SOAK=2400,
+                            **params)
+    assert soaks == [3000., 300., 300., 2400., 300., 300.]
