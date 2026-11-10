@@ -116,6 +116,17 @@ both printer models or through every real-world workflow.
 
 ### Fixed
 
+- `LOAD_FILAMENT`, `UNLOAD_FILAMENT` and `PURGE` with a tool mounted and the
+  motors off no longer run on an empty carriage. Homing docks the mounted
+  tool before it homes Z, but the macro had already decided the tool was on
+  the carriage and skipped picking it up again, so it travelled to the purge
+  chute and fed filament with no tool on. It now picks the tool back up after
+  homing.
+- `ASSIGN_TOOL` with a tool's own number (`TOOL=T2 N=2`) is accepted as the
+  no-op it is, instead of failing; that is what HelixScreen sends to reset its
+  tool mapping. Any other `ASSIGN_TOOL` is still refused, and the error now
+  says that HelixScreen keeps showing the remap anyway -- see
+  [Known issues](docs/known-issues.md).
 - `RESUME` after a `PURGE`, `LOAD_FILAMENT` or `UNLOAD_FILAMENT` during a
   pause no longer drives the mounted tool into a docked one. Those macros
   leave the head at the purge chute or the wipe spot, beside the docks, and

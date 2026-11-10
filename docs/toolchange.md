@@ -374,7 +374,10 @@ Upstream's docking-mode and tool-parameter commands (`TEST_TOOL_DOCKING`,
 `ENTER_DOCKING_MODE`, `SET_TOOL_PARAMETER` and friends) are deliberately
 absent: calibration here is `TOOL_CALIBRATE_TOOL_OFFSET` /
 `TOOL_LOCATE_SENSOR` / `TOOL_Z_ADJUST`, already tied to the factory numbers.
-`ASSIGN_TOOL` is refused — remap tools in the slicer. Nothing to enable; it is
+`ASSIGN_TOOL` accepts only a tool's own number (`TOOL=T2 N=2`, a no-op) and
+refuses any remap — remap tools in the slicer, and see
+[Known issues](known-issues.md) for what a refused remap does to HelixScreen.
+Nothing to enable; it is
 always on. `part_fan` in `[ff_toolchange]` is what gets reported as each
 tool's fan (shared `fan_generic fanM106` on this machine). `ff_toolchange`
 itself stays (the printer-database fingerprint keys on it); the new objects

@@ -1500,13 +1500,36 @@ class FFToolchange:
                           % (mounted, reason, frame,
                              "" if before == after else " -- re-applied"))
 
-    cmd_ASSIGN_TOOL_help = "Not supported on this toolchanger"
+    cmd_ASSIGN_TOOL_help = ("Remapping is not supported; only a tool's own"
+                            " number (TOOL=T<n> N=<n>) is accepted")
 
     def cmd_ASSIGN_TOOL(self, gcmd):
+        """Every tool answers to its own number, and nothing else.
+
+        The identity assignment is accepted as the no-op it is: it is what a
+        UI sends to put its mapping BACK to the machine's (HelixScreen's
+        reset of the tool mapping), and refusing it reported a failure for
+        a request this machine already satisfies.
+
+        Anything else is refused. HelixScreen 0.99.118 writes a remap into
+        its own table before it sends ASSIGN_TOOL and keeps it when the
+        command fails, so after a refused remap it resolves the tool it is
+        told is mounted through a table this machine never had, and names
+        the wrong head as active until it restarts. That is HelixScreen's
+        to fix; the error below says so, so the operator knows why the
+        screen disagrees with the carriage."""
+        tool = self._tool_arg(gcmd)
+        number = gcmd.get_int('N')
+        if number == tool:
+            gcmd.respond_info("ASSIGN_TOOL: T%d already answers to %d"
+                              % (tool, number))
+            return
         raise gcmd.error(
-            "ASSIGN_TOOL: logical-to-physical tool remapping is not supported"
-            " here; remap in the slicer (the fork's"
-            " SDCARD_SET_GCODE_EX_USED_BASE table is the future home)")
+            "ASSIGN_TOOL: T%d cannot answer to T%d -- logical-to-physical"
+            " tool remapping is not supported here; remap in the slicer."
+            " A screen that already shows the remap (HelixScreen) is out of"
+            " step with the printer until it is restarted or its tool"
+            " mapping is reset." % (tool, number))
 
     cmd_SET_TOOL_TEMPERATURE_help = (
         "Set a tool's hotend target (T=<n> | TOOL=T<n>, default the mounted"

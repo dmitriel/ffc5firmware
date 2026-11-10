@@ -873,3 +873,97 @@ def test_pause_records_where_the_print_stopped(model):
         assert "SET_GCODE_VARIABLE MACRO=PAUSE " + line in out
     assert out.index("SET_GCODE_VARIABLE MACRO=PAUSE VARIABLE=saved VALUE=1") \
         < out.index("BASE_PAUSE")
+
+
+def _filament_printer(current_tool, homed, paused=False, z=0.0):
+    """What a filament macro reads, with T`current_tool` on the carriage."""
+    return {
+        "print_stats": {"state": "paused" if paused else "standby"},
+        "pause_resume": {"is_paused": paused},
+        "ff_toolchange": {"current_tool": current_tool, "state_ok": True,
+                          "state_reason": ""},
+        "toolhead": {"homed_axes": "xyz" if homed else "",
+                     "position": {"z": z}},
+        "fan_generic chamber_fan": {"speed": 0.0},
+        **{"tool T%d" % t: {"extruder": "extruder%s" % (t or "")}
+           for t in range(4)}}
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_filament_prep_decides_the_grab_only_after_homing(model):
+    # The bug: T1 mounted, motors off. PREP's G28 docks T1 before homing Z,
+    # but PREP was rendered before that and still read T1 as mounted, so it
+    # never re-grabbed it and loaded on an empty carriage. PREP must leave
+    # the mount decision to a macro rendered after its G28.
+    out, _ = _render_one(model, "_FF_FILAMENT_PREP", {"TOOL": 1, "TEMP": 250},
+                         extra=_filament_printer(1, homed=False))
+    assert "G28" in out
+    assert out.index("G28") < _first(out, "_FF_FILAMENT_MOUNT TOOL=1")
+    assert not any(c.startswith(("SELECT_TOOL", "ACTIVATE_EXTRUDER", "G1"))
+                   for c in out)
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_a_tool_docked_by_homing_is_grabbed_again(model):
+    # What the carriage looks like once the G28 wrapper has docked T1.
+    out, _ = _render_one(model, "_FF_FILAMENT_MOUNT", {"TOOL": 1, "TEMP": 250},
+                         extra=_filament_printer(-1, homed=True))
+    grab = out.index("SELECT_TOOL T=1")
+    assert grab < _first(out, "G1 X")
+    assert not any(c.startswith("ACTIVATE_EXTRUDER") for c in out)
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_the_mounted_tool_is_not_regrabbed(model):
+    out, _ = _render_one(model, "_FF_FILAMENT_MOUNT", {"TOOL": 1, "TEMP": 250},
+                         extra=_filament_printer(1, homed=True, z=20.0))
+    assert "ACTIVATE_EXTRUDER EXTRUDER=extruder1" in out
+    assert not any(c.startswith("SELECT_TOOL") for c in out)
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_unhomed_load_of_the_mounted_tool_regrabs_it_end_to_end(model):
+    # The whole chain at once, with the carriage state changing at the G28
+    # the way the G28 wrapper changes it on the printer.
+    state = _filament_printer(1, homed=False)
+    cp = _parse(model)
+    env = jinja2.Environment("{%", "%}", "{", "}")
+    printer = {}
+    for sec in cp.sections():
+        if sec.startswith("gcode_macro "):
+            printer[sec] = {}
+            for opt in cp.options(sec):
+                if opt.startswith("variable_"):
+                    try:
+                        printer[sec][opt[9:]] = ast.literal_eval(
+                            cp.get(sec, opt))
+                    except (ValueError, SyntaxError):
+                        printer[sec][opt[9:]] = cp.get(sec, opt)
+    printer.update(state)
+    out = []
+
+    def step(line):
+        cmd = line.split()[0].upper() if line.split() else ""
+        if not cmd:
+            return
+        if cmd == "G28":
+            out.append(line)
+            printer["ff_toolchange"] = dict(printer["ff_toolchange"],
+                                            current_tool=-1)
+            printer["toolhead"] = {"homed_axes": "xyz",
+                                   "position": {"z": 0.0}}
+            return
+        if cmd not in ("_FF_FILAMENT_PREP", "_FF_FILAMENT_MOUNT"):
+            out.append(line)
+            return
+        rendered = env.from_string(
+            cp.get("gcode_macro " + cmd, "gcode")).render(
+                params=_parse_params(line, cmd), printer=printer,
+                action_respond_info=lambda m: "",
+                action_raise_error=_raise)
+        for sub in _commands(rendered.splitlines()):
+            step(sub)
+
+    step("_FF_FILAMENT_PREP TOOL=1 TEMP=250")
+    assert out.index("G28") < out.index("SELECT_TOOL T=1") \
+        < _first(out, "G1 X")
