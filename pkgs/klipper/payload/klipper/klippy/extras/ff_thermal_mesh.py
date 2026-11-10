@@ -15,7 +15,7 @@ THREE STAGES
    once, at the start. Each later chamber set first waits for the chamber to
    cool to its lower target -- there is no active cooling -- and is skipped if
    it has not within COOL_TIMEOUT. The first bed step of every set soaks for
-   MAX_SOAK, every other one for SOAK. At each pair it then probes full meshes,
+   MAX_SOAK; every other one waits SOAK, 0 by default. At each pair it then probes full meshes,
    each one verifying the one before: the probe's precision is measured right
    after it, and the two must be identical at CONFIDENCE (verify_meshes:
    average error statistically 0, every node within the probe's noise). The
@@ -1266,8 +1266,10 @@ class FFThermalMesh:
         ch_min = gcmd.get_float('CHAMBER_MIN', 0., minval=0.)
         ch_max = gcmd.get_float('CHAMBER_MAX', ch_min)
         ch_step = gcmd.get_float('CHAMBER_STEP', 10., above=0.)
-        soak = gcmd.get_float('SOAK', 600., minval=0.)
-        max_soak = gcmd.get_float('MAX_SOAK', max(soak, 1800.), minval=0.)
+        # Off by default: the meshes are verified until the plate has
+        # settled, so a fixed wait between bed steps is optional.
+        soak = gcmd.get_float('SOAK', 0., minval=0.)
+        max_soak = gcmd.get_float('MAX_SOAK', 1800., minval=0.)
         chamber_soak = gcmd.get_float('CHAMBER_SOAK', 3600., minval=0.)
         cool_timeout = gcmd.get_float('COOL_TIMEOUT', self.cool_timeout,
                                       above=0.)

@@ -982,3 +982,10 @@ def test_a_shared_reference_touch_widens_the_average_test(tm):
     assert not tm.verify_meshes(a, b, 0.003, 9)["identical"]
     assert tm.verify_meshes(a, b, 0.003, 9,
                             shared_reference=True)["identical"]
+
+
+def test_bed_steps_after_the_first_do_not_soak_by_default(tm, tmp_path):
+    obj, printer, data, soaks = _sweep(
+        tm, tmp_path, BED_MIN=60, BED_MAX=100, BED_STEP=20, CHAMBER_MIN=30,
+        CHAMBER_MAX=40, CHAMBER_STEP=10)
+    assert soaks == [3600., 0., 0., 1800., 0., 0.]

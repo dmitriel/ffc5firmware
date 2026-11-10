@@ -20,7 +20,7 @@ reports before you print on it.
 
 ```gcode
 G28
-THERMAL_MESH_SWEEP BED_MIN=60 BED_MAX=110 BED_STEP=10 CHAMBER_MIN=30 CHAMBER_MAX=60 CHAMBER_STEP=10 SOAK=600 MAX_SOAK=1800 CHAMBER_SOAK=3600
+THERMAL_MESH_SWEEP BED_MIN=60 BED_MAX=110 BED_STEP=10 CHAMBER_MIN=30 CHAMBER_MAX=60 CHAMBER_STEP=10 MAX_SOAK=1800 CHAMBER_SOAK=3600
 ```
 
 | Parameter | Default | Meaning |
@@ -28,8 +28,8 @@ THERMAL_MESH_SWEEP BED_MIN=60 BED_MAX=110 BED_STEP=10 CHAMBER_MIN=30 CHAMBER_MAX
 | `BED_MIN`, `BED_MAX`, `BED_STEP` | — , `BED_MIN`, 10 | Bed targets, °C. The last step is always `BED_MAX`. |
 | `CHAMBER_MIN`, `CHAMBER_MAX`, `CHAMBER_STEP` | 0, `CHAMBER_MIN`, 10 | Chamber targets. `0` means unheated; on the plain Creator 5 leave both at 0. |
 | `CHAMBER_SOAK` | 3600 | Seconds to soak at the very first pair, once both heaters are at target. The only chamber soak in the sweep. |
-| `MAX_SOAK` | `SOAK` or 1800, whichever is longer | Seconds to soak at the first (hottest) bed step of every later chamber set. |
-| `SOAK` | 600 | Seconds to soak after every other bed step. |
+| `MAX_SOAK` | 1800 | Seconds to soak at the first (hottest) bed step of every later chamber set. |
+| `SOAK` | 0 | Optional seconds to soak after every other bed step. Off by default: the meshes are probed until two verify, which waits out the settling anyway. |
 | `COOL_TIMEOUT` | `cool_timeout` (3600) | Seconds to wait for the chamber to cool down to the next, lower, target. If it has not, that chamber set is skipped. |
 | `CONFIDENCE` | `confidence` (0.95) | How sure the verification must be that two meshes are the same (below). |
 | `MAX_SIGMA` | `max_probe_sigma` (0.01) | mm. The most the probe's measured standard deviation may be for a verification to count. |
@@ -55,8 +55,10 @@ chamber 40: bed 110 → … → 60
   better than expected — that whole set is skipped and the sweep moves on to
   the next lower one.
 * **Within a set the bed goes from hottest to coolest.** The first step soaks
-  for `MAX_SOAK` (the bed has just come back from off), every later one for
-  `SOAK`.
+  for `MAX_SOAK` (the bed has just come back from off). Later steps go
+  straight to probing, unless you set `SOAK`: verification keeps probing
+  until the plate has stopped moving, and `soak_time` records how long that
+  took.
 * **The bed is never below the chamber.** Bed targets below the chamber
   target are left out of the plan; at each pair, a bed target below the
   chamber's measured temperature is skipped too. A bed cannot be held below
