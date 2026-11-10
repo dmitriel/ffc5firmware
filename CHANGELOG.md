@@ -39,8 +39,10 @@ both printer models or through every real-world workflow.
   hottest down within each, never with the bed below the chamber. The
   chamber is soaked once; each lower chamber set waits for it to cool and is
   skipped if it does not within `COOL_TIMEOUT`; the first bed step of each set
-  soaks longer (`MAX_SOAK`). Each pair is repeated until two meshes agree
-  within a threshold and stored in `thermal_mesh.json` with the temperatures
+  soaks longer (`MAX_SOAK`). Each pair is probed until a mesh verifies the one
+  before it: the probe's precision is measured right after, and the two must
+  be identical at 95 % confidence -- average error statistically 0 and every
+  node within the probe's noise. The pair is then stored in `thermal_mesh.json` with the temperatures
   measured around it. `THERMAL_MESH_ANALYZE` fits, per mesh node, the bed's
   and the chamber's warp separately against those measured temperatures, and
   picks the four points that best tell the two apart; `THERMAL_MESH_APPLY`

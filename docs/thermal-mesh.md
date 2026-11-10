@@ -20,7 +20,7 @@ reports before you print on it.
 
 ```gcode
 G28
-THERMAL_MESH_SWEEP BED_MIN=60 BED_MAX=110 BED_STEP=10 CHAMBER_MIN=30 CHAMBER_MAX=60 CHAMBER_STEP=10 SOAK=600 MAX_SOAK=1800 CHAMBER_SOAK=3600 THRESHOLD=0.01
+THERMAL_MESH_SWEEP BED_MIN=60 BED_MAX=110 BED_STEP=10 CHAMBER_MIN=30 CHAMBER_MAX=60 CHAMBER_STEP=10 SOAK=600 MAX_SOAK=1800 CHAMBER_SOAK=3600
 ```
 
 | Parameter | Default | Meaning |
@@ -31,7 +31,8 @@ THERMAL_MESH_SWEEP BED_MIN=60 BED_MAX=110 BED_STEP=10 CHAMBER_MIN=30 CHAMBER_MAX
 | `MAX_SOAK` | `SOAK` or 1800, whichever is longer | Seconds to soak at the first (hottest) bed step of every later chamber set. |
 | `SOAK` | 600 | Seconds to soak after every other bed step. |
 | `COOL_TIMEOUT` | `cool_timeout` (3600) | Seconds to wait for the chamber to cool down to the next, lower, target. If it has not, that chamber set is skipped. |
-| `THRESHOLD` | 0.01 | mm. Meshes are probed again until the mean \|ΔZ\| between the last two is below this. |
+| `CONFIDENCE` | `confidence` (0.95) | How sure the verification must be that two meshes are the same (below). |
+| `MAX_SIGMA` | `max_probe_sigma` (0.01) | mm. The most the probe's measured standard deviation may be for a verification to count. |
 | `RESUME` | 0 | `1` keeps the pairs already in the map and continues. Without it an existing map is moved to `thermal_mesh.json.bak`. |
 | `KEEP_HEAT` | 0 | `1` leaves the heaters at the last pair's targets when the sweep finishes. |
 | `POINTS` | 4 | How many probe points the analysis at the end picks. |
@@ -68,10 +69,42 @@ grid; the analysis below does not need a full grid.
 At every pair it waits for the bed (±`bed_tolerance`) and the chamber (at
 least target − `chamber_tolerance`; a hot bed may carry the chamber past its
 target, which is recorded rather than waited out), soaks, then probes full
-meshes. When two in a row agree to within `THRESHOLD` their average is
-stored. After `max_samples` it stores the last two anyway and marks the pair
+meshes until one verifies the one before it (next section), and stores their
+average. After `max_samples` it stores the last two anyway and marks the pair
 `"converged": false`. If a heater does not reach its target within
 `heat_timeout` the sweep stops; fix the cause and run it again with `RESUME=1`.
+
+### Verifying a mesh
+
+Every mesh after the first at a pair is a **verification** of the one before.
+Straight after it, the probe touches the middle of the mesh
+`precision_samples` times (10) and the standard deviation of those touches is
+the probe's precision σ, measured at that moment, on that plate, at that
+heat. If the plate has stopped moving, the difference between the two meshes
+at each node is just two probe readings apart: mean 0, variance 2σ². Two
+tests check that, on the n node differences d:
+
+| Test | Statistic | Passes when |
+|---|---|---|
+| **average error is 0** | n · mean(d)² / 2σ² | below the F(1, dof) quantile |
+| **every node agrees** | Σ(d − mean(d))² / ((n − 1) · 2σ²) | below the F(n − 1, dof) quantile |
+
+dof is the precision touches less one; F rather than normal limits account
+for σ itself being measured. The two tests use independent parts of the
+differences: the average, and what is left once it is taken out. With a
+`zero_reference_position` in `[bed_mesh]`, one reference touch shifts a whole
+mesh, and the first test widens its limit to match. Each test runs at half the remaining risk
+(97.5 % for `CONFIDENCE=0.95`), so the two together hold at 95 %: the meshes
+are accepted only when nothing in them tells them apart from the same plate
+probed twice. The first test catches the whole plate still rising or falling
+by a fraction of σ — 25 nodes average it out of the noise — and the second a
+single region that is still moving while the average stays put.
+
+A noisy enough probe makes any two meshes look alike, so a verification also
+needs σ at or below `MAX_SIGMA`. The console line for each verification gives
+the mean error with its 95 % interval, the rms difference, σ, and both
+statistics against their limits; the map entry keeps them under
+`"verification"`.
 
 Each pair goes to `thermal_mesh.json` beside `printer.cfg` as soon as it is
 done, along with the measured bed and chamber temperatures at the start and
@@ -229,7 +262,7 @@ These are not built in, but the map file has everything they need:
   state than the thermistors suggest.
 * **Curved model.** Add a squared bed term (or a bed × chamber term) to the
   per-node fit if the report's straight-line error is large compared with
-  `THRESHOLD`; that costs one more unknown per term and wants more points.
+  the probe's σ; that costs one more unknown per term and wants more points.
 * **Radial basis / thin-plate correction.** Instead of a plane, spread the
   four residuals with a thin-plate spline, so a local disagreement stays
   local.
@@ -253,6 +286,9 @@ section with just that option at the end of `printer.cfg`.
 | `heat_timeout` | 5400 | Seconds to reach a pair's targets before the sweep stops. |
 | `cool_timeout` | 3600 | Seconds the chamber has to cool to a lower target before that set is skipped (`COOL_TIMEOUT`). |
 | `max_samples` | 6 | Full meshes per pair at most. |
+| `precision_samples` | 10 | Touches at the middle of the mesh after each verification mesh, to measure σ. |
+| `confidence` | 0.95 | `CONFIDENCE`'s default. |
+| `max_probe_sigma` | 0.01 | `MAX_SIGMA`'s default, mm. |
 | `min_point_spacing` | 60 | mm between chosen points. |
 | `before_sample_gcode` | park, `G28 Z`, `BED_MESH_CLEAR`, fan off | Before every mesh in the sweep and before the probe in `APPLY`. |
 | `after_sample_gcode` | 20000 accel, `G1 Z10` | After each. |
@@ -262,4 +298,4 @@ The four-point probe travels and lifts exactly as `BED_MESH_CALIBRATE` does,
 with `[ff_bed_mesh]`'s `travel_speed` and lift.
 
 `printer.ff_thermal_mesh` reports the sweep's state, pair, phase, sample count
-and last ΔZ, and the last `APPLY`'s blend and residuals.
+last mean ΔZ and probe σ, and the last `APPLY`'s blend and residuals.

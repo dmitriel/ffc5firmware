@@ -15,9 +15,12 @@ THREE STAGES
    once, at the start. Each later chamber set first waits for the chamber to
    cool to its lower target -- there is no active cooling -- and is skipped if
    it has not within COOL_TIMEOUT. The first bed step of every set soaks for
-   MAX_SOAK, every other one for SOAK. At each pair it then probes full meshes
-   until the mean |dZ| between the last two is under THRESHOLD and stores
-   their average, with the bed and chamber temperatures measured around it.
+   MAX_SOAK, every other one for SOAK. At each pair it then probes full meshes,
+   each one verifying the one before: the probe's precision is measured right
+   after it, and the two must be identical at CONFIDENCE (verify_meshes:
+   average error statistically 0, every node within the probe's noise). The
+   verified pair's average is stored, with the bed and chamber temperatures
+   measured around it.
    Every finished pair is written to the data file at once, so an abort or a
    power cut loses at most the pair in progress; RESUME=1 picks the sweep
    back up.
@@ -106,9 +109,126 @@ def sweep_plan(bed_temps, chamber_temps):
     return plan
 
 
-def mean_abs_delta(a, b):
-    diffs = [abs(za - zb) for ra, rb in zip(a, b) for za, zb in zip(ra, rb)]
-    return sum(diffs) / len(diffs)
+def _betacf(a, b, x):
+    """Continued fraction for the incomplete beta function (Lentz)."""
+    tiny = 1e-300
+    qab, qap, qam = a + b, a + 1., a - 1.
+    c, d = 1., 1. - qab * x / qap
+    d = 1. / (d if abs(d) > tiny else tiny)
+    h = d
+    for m in range(1, 300):
+        m2 = 2 * m
+        aa = m * (b - m) * x / ((qam + m2) * (a + m2))
+        d = 1. + aa * d
+        d = 1. / (d if abs(d) > tiny else tiny)
+        c = 1. + aa / c
+        c = c if abs(c) > tiny else tiny
+        h *= d * c
+        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
+        d = 1. + aa * d
+        d = 1. / (d if abs(d) > tiny else tiny)
+        c = 1. + aa / c
+        c = c if abs(c) > tiny else tiny
+        step = d * c
+        h *= step
+        if abs(step - 1.) < 1e-14:
+            break
+    return h
+
+
+def betainc(a, b, x):
+    """Regularized incomplete beta function I_x(a, b)."""
+    if x <= 0.:
+        return 0.
+    if x >= 1.:
+        return 1.
+    front = math.exp(math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b)
+                     + a * math.log(x) + b * math.log(1. - x))
+    if x < (a + 1.) / (a + b + 2.):
+        return front * _betacf(a, b, x) / a
+    return 1. - front * _betacf(b, a, 1. - x) / b
+
+
+def f_cdf(x, d1, d2):
+    if x <= 0.:
+        return 0.
+    return betainc(d1 / 2., d2 / 2., d1 * x / (d1 * x + d2))
+
+
+def f_quantile(p, d1, d2):
+    """x with P(F(d1, d2) <= x) = p, by bisection."""
+    lo, hi = 0., 1.
+    while f_cdf(hi, d1, d2) < p:
+        hi *= 2.
+    for _ in range(200):
+        mid = (lo + hi) / 2.
+        if f_cdf(mid, d1, d2) < p:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo < 1e-10 * hi:
+            break
+    return (lo + hi) / 2.
+
+
+def sample_std(values):
+    """(standard deviation, degrees of freedom) of repeated readings."""
+    n = len(values)
+    if n < 2:
+        raise ValueError("precision needs at least two readings")
+    mean = sum(values) / n
+    return math.sqrt(sum((v - mean) ** 2 for v in values) / (n - 1)), n - 1
+
+
+def verify_meshes(a, b, sigma, dof, confidence=0.95, shared_reference=False):
+    """Are two meshes of the same plate the same, given the probe's noise?
+
+    d = b - a at every one of the n nodes. If the plate did not move, each
+    d is the difference of two readings with the probe's standard deviation
+    sigma: mean 0, variance 2 sigma^2. sigma is itself measured, from dof+1
+    repeated readings, so the statistics are F- rather than chi-square-
+    distributed:
+
+      bias   mean(d)^2 / (2 sigma^2 k)          ~ F(1, dof)
+             the average error is 0; k = 1/n, or 1/n + 1 with a
+             shared_reference (bed_mesh's zero_reference_position: one
+             touch shifts every node of a mesh alike)
+      shape  sum((d - mean)^2) / ((n-1) 2 sigma^2)  ~ F(n-1, dof)
+             every node agrees once the average is taken out
+
+    The two use independent parts of d. Each is tested at
+    1 - (1 - confidence)/2 (Bonferroni), so together they hold at
+    `confidence`: when both pass, nothing in the two meshes tells them apart
+    from one plate probed twice. Also returns the two-sided confidence
+    interval of the mean error. A sigma of zero (a perfectly repeatable
+    probe) passes only an exact match.
+    """
+    d = [zb - za for ra, rb in zip(a, b) for za, zb in zip(ra, rb)]
+    n = len(d)
+    mean = sum(d) / n
+    msq = sum(v * v for v in d) / n
+    level = 1. - (1. - confidence) / 2.
+    out = {'n': n, 'mean': mean, 'rms': math.sqrt(msq), 'sigma': sigma,
+           'dof': dof, 'confidence': confidence,
+           'shared_reference': bool(shared_reference)}
+    var = 2. * sigma * sigma
+    k = 1. / n + (1. if shared_reference else 0.)
+    if var <= 0. or n < 2:
+        exact = max(abs(v) for v in d) <= 1e-12
+        out.update(bias=0. if exact else float('inf'), bias_limit=0.,
+                   shape=0. if exact else float('inf'), shape_limit=0.,
+                   mean_ci=0., identical=exact)
+        return out
+    bias_limit = f_quantile(level, 1, dof)
+    shape_limit = f_quantile(level, n - 1, dof)
+    bias = mean * mean / (var * k)
+    shape = sum((v - mean) ** 2 for v in d) / ((n - 1) * var)
+    # t(dof)^2 = F(1, dof): the half-width of the interval for the mean.
+    t = math.sqrt(f_quantile(confidence, 1, dof))
+    out.update(bias=bias, bias_limit=bias_limit, shape=shape,
+               shape_limit=shape_limit, mean_ci=t * math.sqrt(var * k),
+               identical=bias <= bias_limit and shape <= shape_limit)
+    return out
 
 
 def average_matrices(matrices, weights=None):
@@ -689,6 +809,12 @@ class FFThermalMesh:
         self.heat_timeout = config.getfloat('heat_timeout', 5400., above=0.)
         self.cool_timeout = config.getfloat('cool_timeout', 3600., above=0.)
         self.max_samples = config.getint('max_samples', 6, minval=2)
+        self.precision_samples = config.getint('precision_samples', 10,
+                                               minval=3)
+        self.confidence = config.getfloat('confidence', 0.95, minval=0.5,
+                                          maxval=0.999)
+        self.max_probe_sigma = config.getfloat('max_probe_sigma', 0.01,
+                                               above=0.)
         self.min_spacing = config.getfloat(
             'min_point_spacing', 60., minval=0.)
         data_file = config.get('data_file', None)
@@ -712,7 +838,8 @@ class FFThermalMesh:
         self.job = None
         self.status = {'state': 'idle', 'step': 0, 'total': 0, 'phase': '',
                        'bed_target': 0., 'chamber_target': 0.,
-                       'last_delta': None, 'samples': 0, 'remaining': 0.,
+                       'last_delta': None, 'sigma': None, 'samples': 0,
+                       'remaining': 0.,
                        'message': ''}
         self.last_apply = {}
         self._last_probe = None
@@ -720,6 +847,9 @@ class FFThermalMesh:
                                             self._handle_connect)
         self.printer.register_event_handler('klippy:shutdown',
                                             self._handle_shutdown)
+        self._precision = None
+        self.gcode.register_command('_THERMAL_MESH_PRECISION',
+                                    self.cmd__THERMAL_MESH_PRECISION)
         for name in ('SWEEP', 'ABORT', 'STATUS', 'ANALYZE', 'APPLY'):
             cmd = 'THERMAL_MESH_' + name
             func = getattr(self, 'cmd_' + cmd)
@@ -897,28 +1027,75 @@ class FFThermalMesh:
                     "thermal mesh: mesh %s changed from %s to %s during the "
                     "map; start a new sweep" % (key, known[key], params[key]))
 
-    def _sample_until_stable(self, data, threshold):
-        job = self.job
-        previous, delta = None, None
+    def cmd__THERMAL_MESH_PRECISION(self, gcmd):
+        """Probe one point SAMPLES times; the sweep reads the result."""
+        x, y = gcmd.get_float('X'), gcmd.get_float('Y')
+        count = gcmd.get_int('SAMPLES', self.precision_samples, minval=2)
+        self._precision = self._probe_points(
+            gcmd, [{'x': x, 'y': y}] * count, zero_ref=False)
+
+    def _measure_precision(self, params):
+        """(sigma, dof) of the probe, from repeated touches at the middle of
+        the mesh, right after the mesh it judges: same plate, same heat,
+        same probe settings."""
+        x = (params['min_x'] + params['max_x']) / 2.
+        y = (params['min_y'] + params['max_y']) / 2.
+        self._precision = None
+        self.gcode.run_script('_THERMAL_MESH_PRECISION X=%.3f Y=%.3f '
+                              'SAMPLES=%d' % (x, y, self.precision_samples))
+        self.gcode.run_script(self.after_sample.render())
+        if not self._precision:
+            raise self.gcode.error("thermal mesh: precision probe returned "
+                                   "nothing")
+        return sample_std(self._precision)
+
+    def _sample_until_stable(self, data, job):
+        """Probe meshes until one verifies the one before it.
+
+        Each mesh after the first is a verification of the previous one:
+        the probe's precision is measured straight after it, and the pair
+        passes when verify_meshes finds them identical at job['confidence']
+        -- average error indistinguishable from 0 and every node within the
+        probe's noise -- and the probe itself is no noisier than
+        job['max_sigma']. The two are averaged and stored.
+        """
+        previous, check = None, None
         for n in range(1, self.max_samples + 1):
             self._check_abort()
             self.status['samples'] = n
             matrix, params = self._probe_full_mesh()
             self._check_params(data, params)
             if previous is not None:
-                delta = mean_abs_delta(previous, matrix)
-                self.status['last_delta'] = delta
+                self.status['phase'] = 'verifying'
+                sigma, dof = self._measure_precision(data['mesh_params'])
+                check = verify_meshes(
+                    previous, matrix, sigma, dof, job['confidence'],
+                    self._zero_ref()[0] != bed_mesh_module.ZrefMode.DISABLED)
+                check['sigma_ok'] = sigma <= job['max_sigma']
+                self.status.update(phase='sampling', last_delta=check['mean'],
+                                   sigma=sigma)
+                verdict = ("identical" if check['identical'] else
+                           "different")
+                if not check['sigma_ok']:
+                    verdict = "probe too noisy (sigma > %.4f)" % (
+                        job['max_sigma'],)
                 self.gcode.respond_info(
-                    "thermal mesh: chamber %.1f bed %.1f sample %d: "
-                    "mean |dZ| %.4f mm (want < %.4f)"
-                    % (job['chamber'], job['bed'], n, delta, threshold))
-                if delta < threshold:
-                    return average_matrices([previous, matrix]), n, delta, True
+                    "thermal mesh: chamber %.1f bed %.1f sample %d: mean dZ "
+                    "%+.4f +/- %.4f mm, rms %.4f, probe sigma %.4f (%d dof); "
+                    "bias %.2f/%.2f, shape %.2f/%.2f: %s at %.0f%%"
+                    % (job['chamber'], job['bed'], n, check['mean'],
+                       check['mean_ci'], check['rms'], sigma, dof,
+                       check['bias'], check['bias_limit'], check['shape'],
+                       check['shape_limit'], verdict,
+                       job['confidence'] * 100.))
+                if check['identical'] and check['sigma_ok']:
+                    return average_matrices([previous, matrix]), n, check, \
+                        True
             previous = matrix
         self.gcode.respond_info(
-            "thermal mesh: chamber %.1f bed %.1f did not settle in %d samples; "
+            "thermal mesh: chamber %.1f bed %.1f did not verify in %d samples; "
             "keeping the last two" % (job['chamber'], job['bed'], n))
-        return average_matrices([previous, matrix]), n, delta, False
+        return average_matrices([previous, matrix]), n, check, False
 
     def _set_idle_timeout(self, value):
         self.gcode.run_script('SET_IDLE_TIMEOUT TIMEOUT=%.0f' % (value,))
@@ -952,7 +1129,7 @@ class FFThermalMesh:
                 job['chamber'], job['bed'] = chamber, bed
                 self.status.update(phase='heating', bed_target=bed,
                                    chamber_target=chamber, last_delta=None,
-                                   samples=0)
+                                   sigma=None, samples=0)
                 if chamber != current:
                     set_started = False
                     self._set_chamber(chamber)
@@ -996,14 +1173,16 @@ class FFThermalMesh:
                 now = self.reactor.monotonic()
                 bed_start, ch_start = self._bed_temp(now), \
                     self._chamber_temp(now)
-                matrix, samples, delta, converged = self._sample_until_stable(
-                    data, job['threshold'])
+                matrix, samples, check, converged = self._sample_until_stable(
+                    data, job)
                 now = self.reactor.monotonic()
                 data['entries'].append({
                     'chamber': chamber, 'bed': bed,
                     'bed_measured': [bed_start, self._bed_temp(now)],
                     'chamber_measured': [ch_start, self._chamber_temp(now)],
-                    'samples': samples, 'delta': delta,
+                    'samples': samples,
+                    'delta': None if check is None else check['mean'],
+                    'verification': check,
                     'converged': converged, 'matrix': matrix})
                 self._save(data)
             try:
@@ -1064,7 +1243,10 @@ class FFThermalMesh:
         chamber_soak = gcmd.get_float('CHAMBER_SOAK', 3600., minval=0.)
         cool_timeout = gcmd.get_float('COOL_TIMEOUT', self.cool_timeout,
                                       above=0.)
-        threshold = gcmd.get_float('THRESHOLD', 0.01, above=0.)
+        confidence = gcmd.get_float('CONFIDENCE', self.confidence,
+                                    minval=0.5, maxval=0.999)
+        max_sigma = gcmd.get_float('MAX_SIGMA', self.max_probe_sigma,
+                                   above=0.)
         resume = gcmd.get_int('RESUME', 0)
         try:
             beds = temperature_steps(bed_min, bed_max, bed_step)
@@ -1077,7 +1259,8 @@ class FFThermalMesh:
                              % (self.chamber_heater,))
         sweep = {'bed_temps': beds, 'chamber_temps': chambers, 'soak': soak,
                  'max_soak': max_soak, 'chamber_soak': chamber_soak,
-                 'cool_timeout': cool_timeout, 'threshold': threshold}
+                 'cool_timeout': cool_timeout, 'confidence': confidence,
+                 'max_sigma': max_sigma}
         data = self._load() if resume else None
         if data is None:
             if not resume and os.path.exists(self.data_file):
@@ -1096,7 +1279,8 @@ class FFThermalMesh:
         self.job = {'plan': plan, 'data': data, 'abort': False,
                     'soak': soak, 'max_soak': max_soak,
                     'chamber_soak': chamber_soak,
-                    'cool_timeout': cool_timeout, 'threshold': threshold,
+                    'cool_timeout': cool_timeout, 'confidence': confidence,
+                    'max_sigma': max_sigma,
                     'keep_heat': gcmd.get_int('KEEP_HEAT', 0),
                     'points': gcmd.get_int('POINTS', 4, minval=1),
                     'chamber': None, 'bed': None}
@@ -1107,11 +1291,12 @@ class FFThermalMesh:
             "thermal mesh: %d pairs (chamber %s x bed %s, hottest first, bed "
             "never below chamber), %d already stored; chamber soak %ds once, "
             "soak %ds at each set's hottest bed and %ds per bed step, "
-            "cool-down limit %ds, settle < %.4f mm. "
+            "cool-down limit %ds, meshes verified identical at %.0f%% "
+            "(probe sigma <= %.4f mm). "
             "THERMAL_MESH_STATUS to follow, THERMAL_MESH_ABORT to stop."
             % (len(plan), _fmt_list(list(reversed(chambers))),
                _fmt_list(list(reversed(beds))), stored, chamber_soak,
-               max_soak, soak, cool_timeout, threshold))
+               max_soak, soak, cool_timeout, confidence * 100., max_sigma))
         self.reactor.register_callback(self._run_sweep)
 
     cmd_THERMAL_MESH_ABORT_help = "Stop a running thermal mesh sweep"
@@ -1137,10 +1322,12 @@ class FFThermalMesh:
             if s['phase'] == 'cooling':
                 lines.append("chamber cooling, up to %ds more"
                              % (s['remaining'],))
-            if s['phase'] == 'sampling':
-                lines.append("sample %d, last mean |dZ| %s"
+            if s['phase'] in ('sampling', 'verifying'):
+                lines.append("sample %d, last mean dZ %s, probe sigma %s"
                              % (s['samples'], 'n/a' if s['last_delta'] is None
-                                else '%.4f mm' % s['last_delta']))
+                                else '%+.4f mm' % s['last_delta'],
+                                'n/a' if s['sigma'] is None
+                                else '%.4f mm' % s['sigma']))
         elif s['message']:
             lines.append(s['message'])
         data = self._load()
@@ -1227,14 +1414,19 @@ class FFThermalMesh:
     def _probe_finalize(self, offsets, positions):
         self._probed = (offsets, positions)
 
-    def _probe_points(self, gcmd, points):
-        """Z at each point on the same basis as bed_mesh's probed matrix."""
-        coords = [(p['x'], p['y']) for p in points]
-        zref_mode, zref_pos = 0, None
+    def _zero_ref(self):
         mgr = getattr(getattr(self.bed_mesh, 'bmc', None), 'probe_mgr', None)
-        if mgr is not None:
-            zref_mode = mgr.get_zero_ref_mode()
-            zref_pos = mgr.get_zero_ref_pos()
+        if mgr is None:
+            return bed_mesh_module.ZrefMode.DISABLED, None
+        return mgr.get_zero_ref_mode(), mgr.get_zero_ref_pos()
+
+    def _probe_points(self, gcmd, points, zero_ref=True):
+        """Z at each point on the same basis as bed_mesh's probed matrix,
+        or raw touches with zero_ref=False."""
+        coords = [(p['x'], p['y']) for p in points]
+        zref_mode, zref_pos = self._zero_ref()
+        if not zero_ref:
+            zref_mode = bed_mesh_module.ZrefMode.DISABLED
         # With a zero_reference_position bed_mesh shifts the whole mesh so
         # that point reads 0; probing it too puts these on the same footing.
         if zref_mode != bed_mesh_module.ZrefMode.DISABLED:
