@@ -124,6 +124,12 @@ both printer models or through every real-world workflow.
 
 ### Fixed
 
+- The thermal sweep no longer probes the same pair over and over without
+  ever verifying. Each mesh is homed on the plate first, and that homing
+  touch shifts the whole mesh by its own small error; the check that two
+  meshes match treated the shift as real movement unless a
+  `zero_reference_position` was set, so on a settled plate it kept
+  failing. It now always allows for that one touch.
 - `LOAD_FILAMENT`, `UNLOAD_FILAMENT` and `PURGE` with a tool mounted and the
   motors off no longer run on an empty carriage. Homing docks the mounted
   tool before it homes Z, but the macro had already decided the tool was on

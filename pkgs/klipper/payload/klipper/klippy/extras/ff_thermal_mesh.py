@@ -1084,9 +1084,17 @@ class FFThermalMesh:
             if previous is not None:
                 self.status['phase'] = 'verifying'
                 sigma, dof = self._measure_precision(data['mesh_params'])
+                # Every mesh here hangs off ONE reference touch, which moves
+                # all of its nodes alike: before_sample_gcode's G28 Z homes on
+                # the plate before each mesh, and a zero_reference_position,
+                # if set, re-zeroes it on one probed point instead. Either
+                # way the two meshes' averages differ by that touch's noise,
+                # not by sigma/sqrt(n) -- tested without it, the average
+                # failed on homing noise alone, mesh after mesh, however
+                # long the plate had settled.
                 check = verify_meshes(
                     previous[0], matrix, sigma, dof, job['confidence'],
-                    self._zero_ref()[0] != bed_mesh_module.ZrefMode.DISABLED)
+                    shared_reference=True)
                 check['sigma_ok'] = sigma <= job['max_sigma']
                 self.status.update(phase='sampling', last_delta=check['mean'],
                                    sigma=sigma)

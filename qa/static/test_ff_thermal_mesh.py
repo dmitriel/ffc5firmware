@@ -587,6 +587,10 @@ class SweepPrinter(Printer):
         self.heaters = {"heater_bed": Heater(), "chamber_heater": Heater()}
         self.probes = []
         self.ratio, self.mesh_seconds = 4., 100.
+        self.drift = 0.05                     # mm, first mesh vs settled
+        # Each mesh is homed (G28 Z on the plate) before it is probed, so
+        # the homing touch's error shifts all of its nodes alike. Cycled.
+        self.home_noise = [0.]
         self.gcode.run_script = self.run_script
 
     def get_reactor(self):
@@ -620,9 +624,15 @@ class SweepPrinter(Printer):
             key = (c, b)
             n = sum(1 for k in self.probes if k == key)
             self.probes.append(key)
-            drift = 0.05 / (self.ratio ** n)  # quarters with every sample
+            drift = self.drift / (self.ratio ** n)  # quarters each sample
+            home = self.home_noise[(len(self.probes) - 1)
+                                   % len(self.home_noise)]
             self.clock.t += self.mesh_seconds
-            m = [[z + drift for z in row] for row in matrix_at(c, b)]
+            # The plate settles by changing SHAPE: a uniform rise is homed
+            # away by the G28 Z before every mesh, on the printer as here.
+            m = [[z + drift * (1. if (r + k) % 2 else -1.) + home
+                  for k, z in enumerate(row)]
+                 for r, row in enumerate(matrix_at(c, b))]
             self.bed_mesh.mesh = types.SimpleNamespace(
                 get_probed_matrix=lambda: m,
                 get_mesh_params=lambda: PARAMS)
@@ -645,10 +655,10 @@ def test_the_sweep_maps_every_pair_until_it_settles(tm, tmp_path):
     assert obj.status["state"] == "done", obj.status
     pairs = [(e["chamber"], e["bed"]) for e in data["entries"]]
     assert pairs == tm.sweep_plan([60., 80., 100.], [30., 40., 50.])
-    # Each sample sits 0.0375, 0.0094, 0.0023, 0.0006 mm below the one
-    # before. Against a probe sigma of 0.0021 over 25 nodes the average of
-    # 0.0023 is still a real difference; 0.0006 is not.
-    assert {e["samples"] for e in data["entries"]} == {5}
+    # Each sample's nodes move 0.0375, 0.0094, 0.0023 mm (half of them up,
+    # half down) from the one before. Against a probe sigma of 0.0021 a
+    # 0.0094 mm change in shape is real; 0.0023 mm at every node is not.
+    assert {e["samples"] for e in data["entries"]} == {4}
     assert all(e["converged"] for e in data["entries"])
     check = data["entries"][0]["verification"]
     assert check["identical"] and check["dof"] == 9
@@ -656,7 +666,7 @@ def test_the_sweep_maps_every_pair_until_it_settles(tm, tmp_path):
     # The precision touches, ten at the middle of the mesh, after each
     # verification mesh.
     assert printer.gcode.scripts.count(
-        "_THERMAL_MESH_PRECISION X=100.000 Y=100.000 SAMPLES=10") == 9 * 4
+        "_THERMAL_MESH_PRECISION X=100.000 Y=100.000 SAMPLES=10") == 9 * 3
     assert len(data["analysis"]["points"]) == 4
     # Heaters are off and the idle timeout is back afterwards.
     assert printer.heaters["heater_bed"].target == 0.
@@ -697,14 +707,14 @@ def test_the_chamber_soaks_once_and_each_set_starts_with_a_long_bed_soak(
     assert soaks == [3000., 300., 300.,
                      1200., 300., 300.,
                      1200., 300., 300.]
-    # Verified on meshes 4 and 5; three 100 s meshes went before the 4th.
+    # Verified on meshes 3 and 4; two 100 s meshes went before the 3rd.
     assert [e["soak_time"] for e in data["entries"]] == [
-        s + 300. for s in soaks]
+        s + 200. for s in soaks]
 
 
 def test_without_a_limit_it_verifies_for_as_long_as_it_takes(tm, tmp_path):
     printer = SweepPrinter()
-    printer.ratio = 1.5                  # a plate that settles slowly
+    printer.ratio, printer.drift = 1.5, 0.5   # a plate that settles slowly
     obj, printer, data, soaks = _sweep(
         tm, tmp_path, printer, max_samples=0, BED_MIN=60, BED_MAX=60,
         SOAK=0, MAX_SOAK=0, CHAMBER_SOAK=600)
@@ -994,3 +1004,21 @@ def test_a_chamber_soak_at_every_chamber_step_is_optional(tm, tmp_path):
     _, _, _, soaks = _sweep(tm, tmp_path / "on", CHAMBER_STEP_SOAK=2400,
                             **params)
     assert soaks == [3000., 300., 300., 2400., 300., 300.]
+
+
+def test_homing_noise_does_not_stop_a_settled_plate_verifying(tm, tmp_path):
+    # Every mesh is homed on the plate first, and each homing touch lands a
+    # little differently: here +/-3 um, against a probe sigma of ~2 um. That
+    # moves every node of a mesh alike. Judged as if each node were
+    # independent, the average error never passed and the sweep probed on
+    # forever; it has to be judged as the one shared touch it is.
+    printer = SweepPrinter()
+    printer.home_noise = [0.003, -0.003]
+    obj, printer, data, _ = _sweep(
+        tm, tmp_path, printer=printer, max_samples=8, BED_MIN=60, BED_MAX=60,
+        SOAK=0, MAX_SOAK=0, CHAMBER_SOAK=0)
+    (entry,) = data["entries"]
+    assert entry["converged"] is True, entry["verification"]
+    assert entry["verification"]["shared_reference"] is True
+    assert entry["samples"] < 8
+

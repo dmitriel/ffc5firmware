@@ -106,14 +106,22 @@ tests check that, on the n node differences d:
 
 dof is the precision touches less one; F rather than normal limits account
 for σ itself being measured. The two tests use independent parts of the
-differences: the average, and what is left once it is taken out. With a
-`zero_reference_position` in `[bed_mesh]`, one reference touch shifts a whole
-mesh, and the first test widens its limit to match. Each test runs at half the remaining risk
-(97.5 % for `CONFIDENCE=0.95`), so the two together hold at 95 %: the meshes
-are accepted only when nothing in them tells them apart from the same plate
-probed twice. The first test catches the whole plate still rising or falling
-by a fraction of σ — 25 nodes average it out of the noise — and the second a
-single region that is still moving while the average stays put.
+differences: the average, and what is left once it is taken out.
+
+Every mesh hangs off one reference touch: the `G28 Z` that
+`before_sample_gcode` runs on the plate before it, or the
+`zero_reference_position` touch if `[bed_mesh]` has one. That touch's error
+moves every node of the mesh alike, so the first test allows for it: the
+average of two meshes may differ by about one touch's noise, not by σ/√n.
+The plate rising or falling as a whole is homed away by that same touch, so
+it is not something these meshes can show. What the tests catch is the
+plate still changing **shape**: the second test flags any part of it that
+moves beyond the probe's noise, and the first an average shift larger than
+the reference touch accounts for.
+
+Each test runs at half the remaining risk (97.5 % for `CONFIDENCE=0.95`),
+so the two together hold at 95 %: the meshes are accepted only when nothing
+in them tells them apart from the same plate probed twice.
 
 A noisy enough probe makes any two meshes look alike, so a verification also
 needs σ at or below `MAX_SIGMA`. The console line for each verification gives
