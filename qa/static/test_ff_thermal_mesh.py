@@ -1102,3 +1102,44 @@ def test_saving_the_map_never_holds_up_the_reactor(tm, tmp_path,
     assert loaded["entries"] == [{"bed": 60.}]
     assert obj._save_thread is None
 
+
+class BedHeldByChamber(Heater):
+    """A bed with no cooling: it cannot read below the chamber's air."""
+
+    def __init__(self, chamber):
+        super().__init__()
+        self.chamber = chamber
+
+    def get_status(self, eventtime):
+        air = self.chamber.get_status(eventtime)["temperature"]
+        return {"temperature": max(self.target, air)}
+
+
+@pytest.mark.parametrize("air", [60.0, 60.1, 60.8])
+def test_a_chamber_a_little_over_the_bed_target_does_not_skip_it(
+        tm, tmp_path, air):
+    # Bed 60 with the chamber at 60.0-60.8: a hot bed carried the chamber
+    # a hair past its target. These used to be skipped as "below the
+    # chamber"; they run, and the bed the chamber holds a little warm is
+    # accepted.
+    printer = SweepPrinter()
+    chamber = SlowChamber(floor=air)
+    printer.heaters["chamber_heater"] = chamber
+    printer.heaters["heater_bed"] = BedHeldByChamber(chamber)
+    obj, printer, data, _ = _sweep(
+        tm, tmp_path, printer, BED_MIN=60, BED_MAX=60, SOAK=0, MAX_SOAK=0,
+        CHAMBER_SOAK=0)
+    assert obj.status["state"] == "done", obj.status
+    assert [e["bed"] for e in data["entries"]] == [60.]
+    assert not data.get("skipped")
+    assert data["entries"][0]["bed_measured"][0] == pytest.approx(air)
+
+
+def test_a_chamber_well_over_the_bed_target_still_skips_it(tm, tmp_path):
+    printer = SweepPrinter()
+    printer.heaters["chamber_heater"] = SlowChamber(floor=61.5)
+    obj, printer, data, _ = _sweep(
+        tm, tmp_path, printer, BED_MIN=60, BED_MAX=60, SOAK=0, MAX_SOAK=0,
+        CHAMBER_SOAK=0)
+    assert [(k["chamber"], k["bed"]) for k in data["skipped"]] == [(0., 60.)]
+

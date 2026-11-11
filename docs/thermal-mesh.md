@@ -60,9 +60,13 @@ chamber 40: bed 110 → … → 60
   for `MAX_SOAK` (the bed has just come back from off), every later one for
   `SOAK`.
 * **The bed is never below the chamber.** Bed targets below the chamber
-  target are left out of the plan; at each pair, a bed target below the
-  chamber's measured temperature is skipped too. A bed cannot be held below
-  the air around it.
+  target are left out of the plan; at each pair, a bed target more than
+  `bed_tolerance` (1 °C) below the chamber's measured temperature is skipped
+  too. A bed cannot be held below the air around it, but a chamber a little
+  over the bed target — a hot bed easily carries it a few tenths past its
+  own — only holds the bed a little warm: that pair runs, the bed is
+  accepted up to the chamber's temperature plus `bed_tolerance`, and the
+  map records the temperatures actually measured.
 
 Skipped sets and pairs are listed under `"skipped"` in the map file and by
 `THERMAL_MESH_STATUS`. The map that results is triangular rather than a full

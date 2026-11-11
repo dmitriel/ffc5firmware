@@ -141,6 +141,11 @@ both printer models or through every real-world workflow.
   too close"). The map file, every mesh in it, is rewritten after each
   pair, and late in a sweep that took the printer's CPU long enough to stop
   Klipper keeping up with the board. It is now written in the background.
+- The thermal sweep no longer skips a pair whose bed target equals the
+  chamber's because the chamber read a tenth of a degree over it. A bed
+  target is skipped only when the chamber is more than `bed_tolerance`
+  (1 °C) above it, and a bed the warm chamber holds a little over its
+  target is accepted rather than waited on.
 - `LOAD_FILAMENT`, `UNLOAD_FILAMENT` and `PURGE` with a tool mounted and the
   motors off no longer run on an empty carriage. Homing docks the mounted
   tool before it homes Z, but the macro had already decided the tool was on

@@ -1062,11 +1062,19 @@ class FFThermalMesh:
             self._check_abort()
             now = self.reactor.monotonic()
             bed_now = self._bed_temp(now)
-            ok = bed_now is not None and abs(bed_now - bed) <= self.bed_tolerance
+            ch = self._chamber_temp(now)
+            # A bed has no cooling: air warmer than its target holds it
+            # above the target, so as high as the chamber (+ tolerance) is
+            # accepted. The temperatures actually measured are what the
+            # map records and the analysis uses.
+            upper = bed + self.bed_tolerance
+            if ch is not None:
+                upper = max(upper, ch + self.bed_tolerance)
+            ok = (bed_now is not None
+                  and bed - self.bed_tolerance <= bed_now <= upper)
             if chamber > 0.:
                 # The chamber can only be heated: a hot bed may carry it past
                 # the target, which is recorded rather than waited out.
-                ch = self._chamber_temp(now)
                 ok = ok and ch is not None and ch >= chamber - \
                     self.chamber_tolerance
             if ok:
@@ -1285,9 +1293,15 @@ class FFThermalMesh:
                     current = chamber
                 now = self.reactor.monotonic()
                 ch = self._chamber_temp(now)
-                if ch is not None and bed < ch:
+                # Skipped only when the chamber is more than bed_tolerance
+                # over the bed target. A chamber at or a hair over it --
+                # the bed == chamber pair, after a hot bed has carried the
+                # chamber 0.1 past -- still holds the bed within tolerance,
+                # and _wait_for_temps accepts the bed it holds.
+                if ch is not None and bed < ch - self.bed_tolerance:
                     self._skip(data, chamber, bed,
-                               "below the chamber's %.1f" % (ch,))
+                               "more than %.1f below the chamber's %.1f"
+                               % (self.bed_tolerance, ch))
                     continue
                 self._set_bed(bed)
                 self._wait_for_temps(bed, chamber)
