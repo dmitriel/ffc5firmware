@@ -55,6 +55,7 @@ import json
 import logging
 import math
 import os
+import threading
 
 from . import bed_mesh as bed_mesh_module
 from . import probe as probe_module
@@ -883,6 +884,9 @@ class FFThermalMesh:
                                             self._handle_shutdown)
         self._precision = None
         self._precision_plan = []
+        self._save_lock = threading.Lock()
+        self._save_pending = None
+        self._save_thread = None
         self.gcode.register_command('_THERMAL_MESH_PRECISION',
                                     self.cmd__THERMAL_MESH_PRECISION)
         for name in ('SWEEP', 'ABORT', 'STATUS', 'ANALYZE', 'APPLY'):
@@ -910,6 +914,7 @@ class FFThermalMesh:
 
     # -- data file -------------------------------------------------------
     def _load(self):
+        self._wait_saved()
         try:
             with open(self.data_file) as f:
                 data = json.load(f)
@@ -924,11 +929,64 @@ class FFThermalMesh:
                                       DATA_VERSION))
         return data
 
+    # -- saving the map ---------------------------------------------------
+    #
+    # OFF THE REACTOR. The whole map -- every pair's mesh -- is rewritten
+    # after every pair and every skip, and it grows all sweep. json.dump with
+    # an indent is CPython's pure-Python encoder; on the printer's CPU a
+    # late-sweep map took long enough that klippy stopped servicing the MCU
+    # ("Timer too close", right after a stored pair, a skip and the end of
+    # the plan saved back to back). So the encode and the write run in a
+    # worker thread: pure-Python work there gives the GIL back every few ms
+    # and the reactor keeps running. Only the newest snapshot is written;
+    # each lands whole (written to .tmp, then renamed over the map).
+
     def _save(self, data):
-        tmp = self.data_file + '.tmp'
-        with open(tmp, 'w') as f:
-            json.dump(data, f, indent=1)
-        os.replace(tmp, self.data_file)
+        # Shallow is enough: entries and skips are appended, never edited,
+        # and the analysis is replaced whole.
+        snap = dict((k, list(v) if isinstance(v, list) else v)
+                    for k, v in data.items())
+        with self._save_lock:
+            self._save_pending = snap
+            if self._save_thread is None:
+                self._save_thread = threading.Thread(
+                    target=self._save_worker, name='thermal-mesh-save')
+                self._save_thread.daemon = True
+                self._save_thread.start()
+
+    def _save_worker(self):
+        while True:
+            with self._save_lock:
+                snap, self._save_pending = self._save_pending, None
+                if snap is None:
+                    self._save_thread = None
+                    return
+            try:
+                tmp = self.data_file + '.tmp'
+                with open(tmp, 'w') as f:
+                    json.dump(snap, f, indent=1)
+                os.replace(tmp, self.data_file)
+            except Exception as e:
+                logging.exception("thermal mesh: saving %s", self.data_file)
+                notify = getattr(self.reactor, 'register_async_callback',
+                                 None)
+                if notify is not None:
+                    msg = ("thermal mesh: could not save %s: %s"
+                           % (self.data_file, e))
+                    notify(lambda et, m=msg: self.gcode.respond_info(m))
+
+    def _wait_saved(self, yield_reactor=False):
+        """Until every save so far is on disk. yield_reactor: wait in short
+        reactor pauses (from the sweep), not by blocking the thread."""
+        while True:
+            with self._save_lock:
+                thread = self._save_thread
+            if thread is None:
+                return
+            if yield_reactor:
+                self.reactor.pause(self.reactor.monotonic() + 0.05)
+            else:
+                thread.join()
 
     def _require_map(self, need_points=True):
         data = self._load()
@@ -1286,6 +1344,10 @@ class FFThermalMesh:
                     self._set_idle_timeout(idle_restore)
             except Exception:
                 logging.exception("thermal mesh sweep cleanup")
+            try:
+                self._wait_saved(yield_reactor=True)
+            except Exception:
+                logging.exception("thermal mesh sweep: final save")
             skipped = len(data.get('skipped', []))
             if skipped and not message:
                 message = "%d skipped (see 'skipped' in the map file)" % (
@@ -1345,6 +1407,7 @@ class FFThermalMesh:
                  'max_sigma': max_sigma}
         data = self._load() if resume else None
         if data is None:
+            self._wait_saved()        # nothing may land after the move
             if not resume and os.path.exists(self.data_file):
                 os.replace(self.data_file, self.data_file + '.bak')
                 gcmd.respond_info("thermal mesh: previous map kept as %s.bak"

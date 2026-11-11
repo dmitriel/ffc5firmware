@@ -1072,3 +1072,33 @@ def _record_probes(obj, seen):
         start(gcmd)
     obj.probe_helper.start_probe = recording
 
+
+def test_saving_the_map_never_holds_up_the_reactor(tm, tmp_path,
+                                                    monkeypatch):
+    # The map is rewritten whole after every pair, and late in a sweep that
+    # took long enough on the printer to stop klippy servicing the MCU
+    # ("Timer too close"). The write runs in a thread: _save returns at once
+    # even while the encode is stuck, and a read waits for it to land.
+    import threading
+    printer = SweepPrinter()
+    obj = tm.FFThermalMesh(Config(printer,
+                                  data_file=str(tmp_path / "map.json")))
+    gate, started = threading.Event(), threading.Event()
+    real_dump = tm.json.dump
+
+    def slow_dump(data, f, **kw):
+        started.set()
+        assert gate.wait(5)
+        real_dump(data, f, **kw)
+    monkeypatch.setattr(tm.json, "dump", slow_dump)
+    data = {"version": tm.DATA_VERSION, "mesh_params": None, "entries": []}
+    obj._save(data)
+    assert started.wait(5)
+    data["entries"].append({"bed": 60.})     # the sweep carries on
+    obj._save(data)                          # still returns at once
+    assert not (tmp_path / "map.json").exists()
+    gate.set()
+    loaded = obj._load()                     # waits for the writer
+    assert loaded["entries"] == [{"bed": 60.}]
+    assert obj._save_thread is None
+

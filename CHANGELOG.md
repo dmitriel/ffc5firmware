@@ -137,6 +137,10 @@ both printer models or through every real-world workflow.
   scatters least. It now reads nine nodes spread over the mesh, the way the
   mesh itself reads them, and pools their spread. `precision_samples` is
   now readings per node, 4 by default.
+- A long thermal sweep could shut the printer down ("MCU shutdown: Timer
+  too close"). The map file, every mesh in it, is rewritten after each
+  pair, and late in a sweep that took the printer's CPU long enough to stop
+  Klipper keeping up with the board. It is now written in the background.
 - `LOAD_FILAMENT`, `UNLOAD_FILAMENT` and `PURGE` with a tool mounted and the
   motors off no longer run on an empty carriage. Homing docks the mounted
   tool before it homes Z, but the macro had already decided the tool was on
