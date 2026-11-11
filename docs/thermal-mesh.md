@@ -66,7 +66,12 @@ chamber 40: bed 110 → … → 60
   over the bed target — a hot bed easily carries it a few tenths past its
   own — only holds the bed a little warm: that pair runs, the bed is
   accepted up to the chamber's temperature plus `bed_tolerance`, and the
-  map records the temperatures actually measured.
+  map records the temperatures actually measured. When the chamber is
+  further over but still on its way down — moving to a cooler set only
+  waits until it is within `chamber_tolerance` (2 °C) of the new target, so
+  the bed = chamber pair can start 2 °C short — the sweep waits for it to
+  come within `bed_tolerance` of the bed target, up to `COOL_TIMEOUT`, and
+  skips the pair only if it does not.
 
 Skipped sets and pairs are listed under `"skipped"` in the map file and by
 `THERMAL_MESH_STATUS`. The map that results is triangular rather than a full

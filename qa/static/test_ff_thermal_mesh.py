@@ -1143,3 +1143,61 @@ def test_a_chamber_well_over_the_bed_target_still_skips_it(tm, tmp_path):
         CHAMBER_SOAK=0)
     assert [(k["chamber"], k["bed"]) for k in data["skipped"]] == [(0., 60.)]
 
+
+class CoolingChamber:
+    """Reaches a higher target at once, but after a lower one falls only
+    `rate` degC/s from where it was -- down to `floor` at the least."""
+
+    def __init__(self, clock, rate, floor=0.):
+        self.clock, self.rate, self.floor = clock, rate, floor
+        self._target, self._from, self._since = 0., 0., 0.
+
+    def _temp(self, t):
+        cooled = self._from - self.rate * (t - self._since)
+        return max(self._target, self.floor, cooled)
+
+    @property
+    def target(self):
+        return self._target
+
+    @target.setter
+    def target(self, value):
+        now = self.clock.t
+        self._from, self._since = self._temp(now), now
+        self._target = value
+
+    def get_status(self, eventtime):
+        return {"temperature": self._temp(self.clock.t)}
+
+
+def _bed_equals_chamber_sweep(tm, tmp_path, floor=0.):
+    # 65/65, then the 60 set: the chamber comes down from 65 slowly, so the
+    # cool-down to the set (to 60 + chamber_tolerance = 62) ends with it
+    # still 2 C over the 60/60 pair's bed.
+    printer = SweepPrinter()
+    chamber = CoolingChamber(printer.clock, rate=0.002, floor=floor)
+    printer.heaters["chamber_heater"] = chamber
+    printer.heaters["heater_bed"] = BedHeldByChamber(chamber)
+    return _sweep(tm, tmp_path, printer, BED_MIN=60, BED_MAX=65, BED_STEP=5,
+                  CHAMBER_MIN=60, CHAMBER_MAX=65, CHAMBER_STEP=5, SOAK=0,
+                  MAX_SOAK=0, CHAMBER_SOAK=0)
+
+
+def test_the_bed_equals_chamber_pair_waits_for_the_chamber_to_come_down(
+        tm, tmp_path):
+    # Was "skipping chamber 60.0 bed 60.0: below the chamber's 62.0".
+    obj, printer, data, _ = _bed_equals_chamber_sweep(tm, tmp_path)
+    assert obj.status["state"] == "done", obj.status
+    assert [(e["chamber"], e["bed"]) for e in data["entries"]] == [
+        (65., 65.), (60., 65.), (60., 60.)]
+    assert not data.get("skipped")
+    assert data["entries"][-1]["chamber_measured"][0] <= 61.
+
+
+def test_a_chamber_that_stays_too_warm_still_skips_the_pair(tm, tmp_path):
+    obj, printer, data, _ = _bed_equals_chamber_sweep(tm, tmp_path,
+                                                      floor=61.8)
+    assert obj.status["state"] == "done", obj.status
+    assert [(k["chamber"], k["bed"]) for k in data["skipped"]] == [
+        (60., 60.)]
+

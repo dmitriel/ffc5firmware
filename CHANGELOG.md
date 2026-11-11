@@ -145,7 +145,9 @@ both printer models or through every real-world workflow.
   chamber's because the chamber read a tenth of a degree over it. A bed
   target is skipped only when the chamber is more than `bed_tolerance`
   (1 °C) above it, and a bed the warm chamber holds a little over its
-  target is accepted rather than waited on.
+  target is accepted rather than waited on. A chamber still cooling from
+  the set before (it was let off at 2 °C over the new target) is now waited
+  for, up to `COOL_TIMEOUT`, instead of skipping the bed = chamber pair.
 - `LOAD_FILAMENT`, `UNLOAD_FILAMENT` and `PURGE` with a tool mounted and the
   motors off no longer run on an empty carriage. Homing docks the mounted
   tool before it homes Z, but the macro had already decided the tool was on

@@ -1086,19 +1086,19 @@ class FFThermalMesh:
             self.status['remaining'] = 0.
             self.reactor.pause(now + 1.)
 
-    def _cool_chamber(self, chamber, timeout):
-        """Wait for the chamber to fall passively to its (lower) target.
+    def _cool_chamber(self, limit, timeout):
+        """Wait for the chamber to fall passively to `limit` degC.
 
-        True once it is within chamber_tolerance above the target, False if
-        it is still above that after timeout seconds. The chamber has no
-        cooling of its own, so this is the only way down.
+        True once it reads at or below limit, False if it is still above
+        after timeout seconds. The chamber has no cooling of its own, so
+        this is the only way down.
         """
         start = self.reactor.monotonic()
         while True:
             self._check_abort()
             now = self.reactor.monotonic()
             ch = self._chamber_temp(now)
-            if ch is None or ch <= chamber + self.chamber_tolerance:
+            if ch is None or ch <= limit:
                 return True
             if now - start > timeout:
                 return False
@@ -1280,8 +1280,9 @@ class FFThermalMesh:
                         # holds the chamber up while it cools.
                         self.status['phase'] = 'cooling'
                         self._set_bed(0.)
-                        if not self._cool_chamber(chamber,
-                                                  job['cool_timeout']):
+                        if not self._cool_chamber(
+                                chamber + self.chamber_tolerance,
+                                job['cool_timeout']):
                             self._skip(data, chamber, None,
                                        "did not cool below %.1f in %ds"
                                        % (chamber + self.chamber_tolerance,
@@ -1293,16 +1294,30 @@ class FFThermalMesh:
                     current = chamber
                 now = self.reactor.monotonic()
                 ch = self._chamber_temp(now)
-                # Skipped only when the chamber is more than bed_tolerance
-                # over the bed target. A chamber at or a hair over it --
-                # the bed == chamber pair, after a hot bed has carried the
-                # chamber 0.1 past -- still holds the bed within tolerance,
-                # and _wait_for_temps accepts the bed it holds.
-                if ch is not None and bed < ch - self.bed_tolerance:
-                    self._skip(data, chamber, bed,
-                               "more than %.1f below the chamber's %.1f"
-                               % (self.bed_tolerance, ch))
-                    continue
+                # The bed cannot be held more than bed_tolerance below the
+                # air. A chamber a hair over the bed target still holds the
+                # bed within that, and _wait_for_temps accepts it.
+                limit = bed + self.bed_tolerance
+                if ch is not None and ch > limit:
+                    # Further over, on a heated set whose own target is at
+                    # or below this bed target, the chamber is still coming
+                    # down from the set before (the cool-down to a new set
+                    # stops at target + chamber_tolerance, the bed == chamber
+                    # pair needs target + bed_tolerance), or the previous,
+                    # hotter bed is holding it up. Its heater is set lower,
+                    # so it gets there: wait, with the bed at its own target,
+                    # rather than skip a pair the plan says is reachable.
+                    if chamber > 0. and bed >= chamber:
+                        self.status['phase'] = 'cooling'
+                        self._set_bed(bed)
+                        if self._cool_chamber(limit, job['cool_timeout']):
+                            ch = self._chamber_temp(self.reactor.monotonic())
+                        self.status['phase'] = 'heating'
+                    if ch is not None and ch > limit:
+                        self._skip(data, chamber, bed,
+                                   "more than %.1f below the chamber's %.1f"
+                                   % (self.bed_tolerance, ch))
+                        continue
                 self._set_bed(bed)
                 self._wait_for_temps(bed, chamber)
                 reached = self.reactor.monotonic()
