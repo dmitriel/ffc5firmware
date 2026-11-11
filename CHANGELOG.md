@@ -148,6 +148,9 @@ both printer models or through every real-world workflow.
   target is accepted rather than waited on. A chamber still cooling from
   the set before (it was let off at 2 °C over the new target) is now waited
   for, up to `COOL_TIMEOUT`, instead of skipping the bed = chamber pair.
+- The thermal sweep runs the chamber fan at full speed while it waits for
+  the chamber to cool to a lower set, and puts it back to its previous
+  speed afterwards (`cool_fan` / `cool_fan_speed` in `[ff_thermal_mesh]`).
 - `LOAD_FILAMENT`, `UNLOAD_FILAMENT` and `PURGE` with a tool mounted and the
   motors off no longer run on an empty carriage. Homing docks the mounted
   tool before it homes Z, but the macro had already decided the tool was on

@@ -591,6 +591,7 @@ class SweepPrinter(Printer):
         # Each mesh is homed (G28 Z on the plate) before it is probed, so
         # the homing touch's error shifts all of its nodes alike. Cycled.
         self.home_noise = [0.]
+        self.extra_objects = {}
         self.gcode.run_script = self.run_script
 
     def get_reactor(self):
@@ -607,6 +608,7 @@ class SweepPrinter(Printer):
             "toolhead": types.SimpleNamespace(
                 get_status=lambda t: {"homed_axes": "xyz"}),
             "idle_timeout": types.SimpleNamespace(idle_timeout=600.)}
+        objects.update(self.extra_objects)
         return objects.get(name, default)
 
     def run_script(self, script):
@@ -1200,4 +1202,46 @@ def test_a_chamber_that_stays_too_warm_still_skips_the_pair(tm, tmp_path):
     assert obj.status["state"] == "done", obj.status
     assert [(k["chamber"], k["bed"]) for k in data["skipped"]] == [
         (60., 60.)]
+
+
+def test_the_chamber_fan_runs_while_the_chamber_cools_then_goes_back(
+        tm, tmp_path):
+    printer = SweepPrinter()
+    chamber = CoolingChamber(printer.clock, rate=0.002)
+    printer.heaters["chamber_heater"] = chamber
+    printer.heaters["heater_bed"] = BedHeldByChamber(chamber)
+    fan = types.SimpleNamespace(get_status=lambda t: {"speed": 0.3})
+    printer.extra_objects["fan_generic chamber_fan"] = fan
+    obj, printer, data, _ = _sweep(
+        tm, tmp_path, printer, BED_MIN=60, BED_MAX=65, BED_STEP=5,
+        CHAMBER_MIN=60, CHAMBER_MAX=65, CHAMBER_STEP=5, SOAK=0, MAX_SOAK=0,
+        CHAMBER_SOAK=0)
+    assert obj.status["state"] == "done", obj.status
+    fans = [s for s in printer.gcode.scripts if s.startswith("SET_FAN_SPEED")]
+    # Two cool-downs: to the 60 set, then to 61 for the 60/60 pair. Full
+    # speed for each, the 0.3 it had after each.
+    assert fans == ["SET_FAN_SPEED FAN=chamber_fan SPEED=1.000",
+                    "SET_FAN_SPEED FAN=chamber_fan SPEED=0.300"] * 2
+    scripts = printer.gcode.scripts
+    on = scripts.index(fans[0])
+    assert "BED_MESH_CALIBRATE" not in scripts[on:scripts.index(fans[1])]
+
+
+def test_no_cool_fan_configured_runs_no_fan(tm, tmp_path):
+    printer = SweepPrinter()
+    chamber = CoolingChamber(printer.clock, rate=0.002)
+    printer.heaters["chamber_heater"] = chamber
+    printer.heaters["heater_bed"] = BedHeldByChamber(chamber)
+    printer.extra_objects["fan_generic chamber_fan"] = types.SimpleNamespace(
+        get_status=lambda t: {"speed": 0.})
+    obj = tm.FFThermalMesh(Config(printer, cool_fan="",
+                                  data_file=str(tmp_path / "m.json"),
+                                  cool_timeout=3600., heat_timeout=100.))
+    printer.handlers["klippy:connect"]()
+    obj.probe_helper.z_at = repeatable_probe()
+    printer.gcode.commands["THERMAL_MESH_SWEEP"](Gcmd(
+        BED_MIN=60, BED_MAX=65, BED_STEP=5, CHAMBER_MIN=60, CHAMBER_MAX=65,
+        CHAMBER_STEP=5, SOAK=0, MAX_SOAK=0, CHAMBER_SOAK=0))
+    assert not any(s.startswith("SET_FAN_SPEED")
+                   for s in printer.gcode.scripts)
 

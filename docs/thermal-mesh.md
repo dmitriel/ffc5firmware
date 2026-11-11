@@ -51,9 +51,11 @@ chamber 40: bed 110 → … → 60
 * **The chamber is soaked once**, at the first pair (`CHAMBER_SOAK`). It is
   held at each lower target by its heater after that; set
   `CHAMBER_STEP_SOAK` to soak it again at every chamber step.
-* **Down to the next chamber target**, the bed is switched off and the sweep
-  waits for the chamber to fall to within `chamber_tolerance` of the new
-  target. If it has not within `COOL_TIMEOUT` — the enclosure holds heat
+* **Down to the next chamber target**, the bed is switched off, the chamber
+  fan (`cool_fan`) runs at full speed, and the sweep waits for the chamber
+  to fall to within `chamber_tolerance` of the new target; the fan then goes
+  back to the speed it had. Any other wait for the chamber to cool runs the
+  fan the same way. If it has not within `COOL_TIMEOUT` — the enclosure holds heat
   better than expected — that whole set is skipped and the sweep moves on to
   the next lower one.
 * **Within a set the bed goes from hottest to coolest.** The first step soaks
@@ -323,6 +325,8 @@ section with just that option at the end of `printer.cfg`.
 | `chamber_tolerance` | 2.0 | °C below the chamber target. |
 | `heat_timeout` | 5400 | Seconds to reach a pair's targets before the sweep stops. |
 | `cool_timeout` | 3600 | Seconds the chamber has to cool to a lower target before that set is skipped (`COOL_TIMEOUT`). |
+| `cool_fan` | `chamber_fan` | `[fan_generic]` run while the sweep waits for the chamber to cool, then put back to its previous speed. Empty: no fan. |
+| `cool_fan_speed` | 1.0 | Its speed for those waits. |
 | `max_samples` | 0 | Full meshes per pair at most; 0 keeps going until two verify. |
 | `precision_samples` | 4 | Readings of each of the nine precision nodes after each verification mesh, to measure σ. |
 | `confidence` | 0.95 | `CONFIDENCE`'s default. |

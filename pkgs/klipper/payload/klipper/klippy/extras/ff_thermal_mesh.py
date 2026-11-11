@@ -838,6 +838,11 @@ class FFThermalMesh:
             'chamber_tolerance', 2., above=0.)
         self.heat_timeout = config.getfloat('heat_timeout', 5400., above=0.)
         self.cool_timeout = config.getfloat('cool_timeout', 3600., above=0.)
+        # A [fan_generic] run while the sweep waits for the chamber to cool,
+        # then put back to its previous speed. Empty: none.
+        self.cool_fan = (config.get('cool_fan', 'chamber_fan') or '').strip()
+        self.cool_fan_speed = config.getfloat('cool_fan_speed', 1.,
+                                              minval=0., maxval=1.)
         # 0: keep verifying until a pair of meshes passes (ABORT stops it).
         self.max_samples = config.getint('max_samples', 0, minval=0)
         if self.max_samples == 1:
@@ -1086,13 +1091,32 @@ class FFThermalMesh:
             self.status['remaining'] = 0.
             self.reactor.pause(now + 1.)
 
+    def _set_cool_fan(self, speed):
+        self.gcode.run_script('SET_FAN_SPEED FAN=%s SPEED=%.3f'
+                              % (self.cool_fan, speed))
+
     def _cool_chamber(self, limit, timeout):
-        """Wait for the chamber to fall passively to `limit` degC.
+        """Wait for the chamber to fall to `limit` degC.
 
         True once it reads at or below limit, False if it is still above
-        after timeout seconds. The chamber has no cooling of its own, so
-        this is the only way down.
+        after timeout seconds. The chamber has no heat pump, only cool_fan
+        (chamber_fan by default), which runs at cool_fan_speed for the wait
+        and goes back to the speed it had afterwards.
         """
+        fan = None
+        if self.cool_fan and self.cool_fan_speed > 0.:
+            fan = self.printer.lookup_object('fan_generic ' + self.cool_fan,
+                                             None)
+        if fan is None:
+            return self._wait_chamber_down(limit, timeout)
+        before = fan.get_status(self.reactor.monotonic()).get('speed', 0.)
+        self._set_cool_fan(self.cool_fan_speed)
+        try:
+            return self._wait_chamber_down(limit, timeout)
+        finally:
+            self._set_cool_fan(before)
+
+    def _wait_chamber_down(self, limit, timeout):
         start = self.reactor.monotonic()
         while True:
             self._check_abort()
