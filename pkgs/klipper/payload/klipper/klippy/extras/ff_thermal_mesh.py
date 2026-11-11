@@ -181,6 +181,34 @@ def sample_std(values):
     return math.sqrt(sum((v - mean) ** 2 for v in values) / (n - 1)), n - 1
 
 
+def pooled_std(groups):
+    """(standard deviation, degrees of freedom) pooled over several points,
+    each read repeatedly: the spread of every point about its own mean.
+    Points whose true heights differ do not inflate it."""
+    ss, dof = 0., 0
+    for values in groups:
+        if len(values) < 2:
+            continue
+        mean = sum(values) / len(values)
+        ss += sum((v - mean) ** 2 for v in values)
+        dof += len(values) - 1
+    if dof < 1:
+        raise ValueError("precision needs a point read at least twice")
+    return math.sqrt(ss / dof), dof
+
+
+def precision_nodes(params):
+    """Nine mesh nodes, a 3 x 3 spread over the mesh: its corners, edge
+    middles and middle. A probe is not equally repeatable everywhere over
+    the bed -- on the Creator 5 the edges read far noisier than the middle
+    -- so its noise is measured where the mesh is, not at one spot."""
+    rows = sorted(set([0, (params['y_count'] - 1) // 2,
+                       params['y_count'] - 1]))
+    cols = sorted(set([0, (params['x_count'] - 1) // 2,
+                       params['x_count'] - 1]))
+    return [node_xy(params, r, c) for r in rows for c in cols]
+
+
 def verify_meshes(a, b, sigma, dof, confidence=0.95, shared_reference=False):
     """Are two meshes of the same plate the same, given the probe's noise?
 
@@ -814,8 +842,9 @@ class FFThermalMesh:
         if self.max_samples == 1:
             raise config.error("ff_thermal_mesh: max_samples is 0 (no limit) "
                                "or at least 2: a mesh needs one to verify it")
-        self.precision_samples = config.getint('precision_samples', 10,
-                                               minval=3)
+        # Readings of EACH of the nine precision nodes, per verification.
+        self.precision_samples = config.getint('precision_samples', 4,
+                                               minval=2)
         self.confidence = config.getfloat('confidence', 0.95, minval=0.5,
                                           maxval=0.999)
         self.max_probe_sigma = config.getfloat('max_probe_sigma', 0.01,
@@ -853,6 +882,7 @@ class FFThermalMesh:
         self.printer.register_event_handler('klippy:shutdown',
                                             self._handle_shutdown)
         self._precision = None
+        self._precision_plan = []
         self.gcode.register_command('_THERMAL_MESH_PRECISION',
                                     self.cmd__THERMAL_MESH_PRECISION)
         for name in ('SWEEP', 'ABORT', 'STATUS', 'ANALYZE', 'APPLY'):
@@ -1033,26 +1063,36 @@ class FFThermalMesh:
                     "map; start a new sweep" % (key, known[key], params[key]))
 
     def cmd__THERMAL_MESH_PRECISION(self, gcmd):
-        """Probe one point SAMPLES times; the sweep reads the result."""
-        x, y = gcmd.get_float('X'), gcmd.get_float('Y')
-        count = gcmd.get_int('SAMPLES', self.precision_samples, minval=2)
+        """Probe the points _measure_precision staged; the sweep reads the
+        result. Takes NO probe parameters: the probe reads SAMPLES and the
+        like off this command, and the readings must be taken exactly the
+        way bed_mesh takes a node's."""
         self._precision = self._probe_points(
-            gcmd, [{'x': x, 'y': y}] * count, zero_ref=False)
+            gcmd, [{'x': x, 'y': y} for x, y in self._precision_plan],
+            zero_ref=False)
 
     def _measure_precision(self, params):
-        """(sigma, dof) of the probe, from repeated touches at the middle of
-        the mesh, right after the mesh it judges: same plate, same heat,
-        same probe settings."""
-        x = (params['min_x'] + params['max_x']) / 2.
-        y = (params['min_y'] + params['max_y']) / 2.
+        """(sigma, dof) of one mesh NODE reading, right after the mesh it
+        judges: same plate, same heat, same probe settings.
+
+        Each of precision_nodes() is read precision_samples times, visited
+        in turn rather than touched in place, so every reading is a fresh
+        approach like a mesh node's, and the spread is pooled over all nine.
+        This used to touch the middle of the bed alone and pass the probe
+        SAMPLES=<precision_samples>, which it took as touches per reading:
+        each reading was then the median of ten touches at the bed's
+        quietest spot, and sigma came out ~7x below a node's real noise."""
+        nodes = precision_nodes(params)
+        self._precision_plan = nodes * self.precision_samples
         self._precision = None
-        self.gcode.run_script('_THERMAL_MESH_PRECISION X=%.3f Y=%.3f '
-                              'SAMPLES=%d' % (x, y, self.precision_samples))
+        self.gcode.run_script('_THERMAL_MESH_PRECISION')
         self.gcode.run_script(self.after_sample.render())
-        if not self._precision:
+        if not self._precision or \
+                len(self._precision) != len(self._precision_plan):
             raise self.gcode.error("thermal mesh: precision probe returned "
                                    "nothing")
-        return sample_std(self._precision)
+        groups = [self._precision[i::len(nodes)] for i in range(len(nodes))]
+        return pooled_std(groups)
 
     def _sample_until_stable(self, data, job, reached):
         """Probe meshes until one verifies the one before it.

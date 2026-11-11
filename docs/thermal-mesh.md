@@ -92,10 +92,16 @@ start of that same mesh and at the end of the verification. If a heater does not
 ### Verifying a mesh
 
 Every mesh after the first at a pair is a **verification** of the one before.
-Straight after it, the probe touches the middle of the mesh
-`precision_samples` times (10) and the standard deviation of those touches is
-the probe's precision σ, measured at that moment, on that plate, at that
-heat. If the plate has stopped moving, the difference between the two meshes
+Straight after it, the probe reads nine mesh nodes — the corners, the
+middles of the edges and the middle — `precision_samples` times each (4),
+going round them in turn so that every reading is a fresh approach, exactly
+as a mesh node is read (same probe settings, same number of touches per
+reading). The spread of each node's readings about its own mean, pooled over
+the nine, is the probe's precision σ, measured at that moment, on that
+plate, at that heat. It is measured across the bed because the probe is not
+equally repeatable everywhere: on the Creator 5 a touch at the edges
+scatters about three times as much as one in the middle. If the plate has
+stopped moving, the difference between the two meshes
 at each node is just two probe readings apart: mean 0, variance 2σ². Two
 tests check that, on the n node differences d:
 
@@ -309,7 +315,7 @@ section with just that option at the end of `printer.cfg`.
 | `heat_timeout` | 5400 | Seconds to reach a pair's targets before the sweep stops. |
 | `cool_timeout` | 3600 | Seconds the chamber has to cool to a lower target before that set is skipped (`COOL_TIMEOUT`). |
 | `max_samples` | 0 | Full meshes per pair at most; 0 keeps going until two verify. |
-| `precision_samples` | 10 | Touches at the middle of the mesh after each verification mesh, to measure σ. |
+| `precision_samples` | 4 | Readings of each of the nine precision nodes after each verification mesh, to measure σ. |
 | `confidence` | 0.95 | `CONFIDENCE`'s default. |
 | `max_probe_sigma` | 0.01 | `MAX_SIGMA`'s default, mm. |
 | `min_point_spacing` | 60 | mm between chosen points. |

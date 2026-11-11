@@ -661,12 +661,12 @@ def test_the_sweep_maps_every_pair_until_it_settles(tm, tmp_path):
     assert {e["samples"] for e in data["entries"]} == {4}
     assert all(e["converged"] for e in data["entries"])
     check = data["entries"][0]["verification"]
-    assert check["identical"] and check["dof"] == 9
-    assert check["sigma"] == pytest.approx(0.002 * (10 / 9) ** .5)
-    # The precision touches, ten at the middle of the mesh, after each
-    # verification mesh.
-    assert printer.gcode.scripts.count(
-        "_THERMAL_MESH_PRECISION X=100.000 Y=100.000 SAMPLES=10") == 9 * 3
+    # Four readings at each of nine nodes: 9 x 3 degrees of freedom. The
+    # stub's readings alternate +/-0.002, so each node's four are +-+- .
+    assert check["identical"] and check["dof"] == 27
+    assert check["sigma"] == pytest.approx(0.002 * (4 / 3) ** .5)
+    # One precision measurement after each verification mesh.
+    assert printer.gcode.scripts.count("_THERMAL_MESH_PRECISION") == 9 * 3
     assert len(data["analysis"]["points"]) == 4
     # Heaters are off and the idle timeout is back afterwards.
     assert printer.heaters["heater_bed"].target == 0.
@@ -674,7 +674,8 @@ def test_the_sweep_maps_every_pair_until_it_settles(tm, tmp_path):
     assert printer.gcode.scripts[-1] == "SET_IDLE_TIMEOUT TIMEOUT=600"
 
 
-def _sweep(tm, tmp_path, printer=None, max_samples=6, **params):
+def _sweep(tm, tmp_path, printer=None, max_samples=6, _hook=None,
+           **params):
     printer = printer or SweepPrinter()
     tmp_path.mkdir(parents=True, exist_ok=True)
     obj = tm.FFThermalMesh(Config(printer,
@@ -688,6 +689,8 @@ def _sweep(tm, tmp_path, printer=None, max_samples=6, **params):
     soaks = []
     sleep = obj._sleep
     obj._sleep = lambda seconds: soaks.append(seconds) or sleep(seconds)
+    if _hook is not None:
+        _hook(obj)
     printer.gcode.commands["THERMAL_MESH_SWEEP"](Gcmd(**params))
     data = json.loads((tmp_path / "thermal_mesh.json").read_text())
     return obj, printer, data, soaks
@@ -1021,4 +1024,51 @@ def test_homing_noise_does_not_stop_a_settled_plate_verifying(tm, tmp_path):
     assert entry["converged"] is True, entry["verification"]
     assert entry["verification"]["shared_reference"] is True
     assert entry["samples"] < 8
+
+
+def test_pooled_precision_ignores_how_high_each_point_is(tm):
+    sigma, dof = tm.pooled_std([[1.0, 1.002, 0.998], [5.0, 5.002, 4.998]])
+    assert dof == 4
+    assert sigma == pytest.approx(0.002)
+    with pytest.raises(ValueError):
+        tm.pooled_std([[1.0], [2.0]])
+
+
+def test_precision_nodes_spread_over_the_mesh(tm):
+    params = dict(PARAMS, x_count=10, y_count=10, min_x=13., max_x=263.,
+                  min_y=4., max_y=254.)
+    nodes = tm.precision_nodes(params)
+    assert len(nodes) == 9
+    assert {x for x, _ in nodes} == {13., 263., 13. + 4 * 250. / 9}
+    assert {y for _, y in nodes} == {4., 254., 4. + 4 * 250. / 9}
+
+
+def test_precision_reads_like_a_mesh_node_round_the_mesh(tm, tmp_path):
+    # The probe takes SAMPLES (and its other settings) off the command it
+    # is handed. The precision command used to pass SAMPLES=10, so every
+    # reading was the median of ten touches -- and all of them at the
+    # middle, the bed's quietest spot. It must pass nothing, and read nine
+    # nodes in turn.
+    printer = SweepPrinter()
+    seen = []
+    obj, printer, data, _ = _sweep(
+        tm, tmp_path, printer=printer, BED_MIN=60, BED_MAX=60, SOAK=0,
+        MAX_SOAK=0, CHAMBER_SOAK=0,
+        _hook=lambda obj: _record_probes(obj, seen))
+    precision = [(params, points) for params, points in seen
+                 if len(points) == 9 * 4]
+    assert precision, seen
+    for params, points in precision:
+        assert params == {}
+        assert points[:9] == points[9:18] == points[18:27]
+        assert len(set(points[:9])) == 9
+
+
+def _record_probes(obj, seen):
+    start = obj.probe_helper.start_probe
+
+    def recording(gcmd):
+        seen.append((dict(gcmd.params), list(obj.probe_helper.points)))
+        start(gcmd)
+    obj.probe_helper.start_probe = recording
 

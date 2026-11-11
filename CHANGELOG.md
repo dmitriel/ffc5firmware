@@ -130,6 +130,13 @@ both printer models or through every real-world workflow.
   meshes match treated the shift as real movement unless a
   `zero_reference_position` was set, so on a settled plate it kept
   failing. It now always allows for that one touch.
+- The thermal sweep measured the probe's noise about seven times too low,
+  so even a settled bed could not verify. Each of its readings was secretly
+  the median of ten touches (the probe took its `SAMPLES=10` as touches per
+  reading), and all of them were at the middle of the bed, where the probe
+  scatters least. It now reads nine nodes spread over the mesh, the way the
+  mesh itself reads them, and pools their spread. `precision_samples` is
+  now readings per node, 4 by default.
 - `LOAD_FILAMENT`, `UNLOAD_FILAMENT` and `PURGE` with a tool mounted and the
   motors off no longer run on an empty carriage. Homing docks the mounted
   tool before it homes Z, but the macro had already decided the tool was on
