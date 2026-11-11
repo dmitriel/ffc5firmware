@@ -54,8 +54,7 @@ chamber 40: bed 110 → … → 60
 * **Down to the next chamber target**, the bed is switched off, the chamber
   fan (`cool_fan`) runs at full speed, and the sweep waits for the chamber
   to fall to within `chamber_tolerance` of the new target; the fan then goes
-  back to the speed it had. Any other wait for the chamber to cool runs the
-  fan the same way. If it has not within `COOL_TIMEOUT` — the enclosure holds heat
+  back to the speed it had. If it has not within `COOL_TIMEOUT` — the enclosure holds heat
   better than expected — that whole set is skipped and the sweep moves on to
   the next lower one.
 * **Within a set the bed goes from hottest to coolest.** The first step soaks
@@ -68,12 +67,7 @@ chamber 40: bed 110 → … → 60
   over the bed target — a hot bed easily carries it a few tenths past its
   own — only holds the bed a little warm: that pair runs, the bed is
   accepted up to the chamber's temperature plus `bed_tolerance`, and the
-  map records the temperatures actually measured. When the chamber is
-  further over but still on its way down — moving to a cooler set only
-  waits until it is within `chamber_tolerance` (2 °C) of the new target, so
-  the bed = chamber pair can start 2 °C short — the sweep waits for it to
-  come within `bed_tolerance` of the bed target, up to `COOL_TIMEOUT`, and
-  skips the pair only if it does not.
+  map records the temperatures actually measured.
 
 Skipped sets and pairs are listed under `"skipped"` in the map file and by
 `THERMAL_MESH_STATUS`. The map that results is triangular rather than a full

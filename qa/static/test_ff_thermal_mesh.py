@@ -1173,9 +1173,8 @@ class CoolingChamber:
 
 
 def _bed_equals_chamber_sweep(tm, tmp_path, floor=0.):
-    # 65/65, then the 60 set: the chamber comes down from 65 slowly, so the
-    # cool-down to the set (to 60 + chamber_tolerance = 62) ends with it
-    # still 2 C over the 60/60 pair's bed.
+    # 65/65, then the 60 set: the chamber comes down from 65 to the set
+    # (60 + chamber_tolerance = 62).
     printer = SweepPrinter()
     chamber = CoolingChamber(printer.clock, rate=0.002, floor=floor)
     printer.heaters["chamber_heater"] = chamber
@@ -1185,18 +1184,8 @@ def _bed_equals_chamber_sweep(tm, tmp_path, floor=0.):
                   MAX_SOAK=0, CHAMBER_SOAK=0)
 
 
-def test_the_bed_equals_chamber_pair_waits_for_the_chamber_to_come_down(
-        tm, tmp_path):
-    # Was "skipping chamber 60.0 bed 60.0: below the chamber's 62.0".
-    obj, printer, data, _ = _bed_equals_chamber_sweep(tm, tmp_path)
-    assert obj.status["state"] == "done", obj.status
-    assert [(e["chamber"], e["bed"]) for e in data["entries"]] == [
-        (65., 65.), (60., 65.), (60., 60.)]
-    assert not data.get("skipped")
-    assert data["entries"][-1]["chamber_measured"][0] <= 61.
-
-
-def test_a_chamber_that_stays_too_warm_still_skips_the_pair(tm, tmp_path):
+def test_a_chamber_still_too_warm_for_the_bed_skips_the_pair(tm, tmp_path):
+    # No second wait for the bed == chamber pair: one cool-down per set.
     obj, printer, data, _ = _bed_equals_chamber_sweep(tm, tmp_path,
                                                       floor=61.8)
     assert obj.status["state"] == "done", obj.status
@@ -1218,10 +1207,9 @@ def test_the_chamber_fan_runs_while_the_chamber_cools_then_goes_back(
         CHAMBER_SOAK=0)
     assert obj.status["state"] == "done", obj.status
     fans = [s for s in printer.gcode.scripts if s.startswith("SET_FAN_SPEED")]
-    # Two cool-downs: to the 60 set, then to 61 for the 60/60 pair. Full
-    # speed for each, the 0.3 it had after each.
+    # One cool-down, to the 60 set: full speed, then the 0.3 it had.
     assert fans == ["SET_FAN_SPEED FAN=chamber_fan SPEED=1.000",
-                    "SET_FAN_SPEED FAN=chamber_fan SPEED=0.300"] * 2
+                    "SET_FAN_SPEED FAN=chamber_fan SPEED=0.300"]
     scripts = printer.gcode.scripts
     on = scripts.index(fans[0])
     assert "BED_MESH_CALIBRATE" not in scripts[on:scripts.index(fans[1])]

@@ -145,9 +145,7 @@ both printer models or through every real-world workflow.
   chamber's because the chamber read a tenth of a degree over it. A bed
   target is skipped only when the chamber is more than `bed_tolerance`
   (1 °C) above it, and a bed the warm chamber holds a little over its
-  target is accepted rather than waited on. A chamber still cooling from
-  the set before (it was let off at 2 °C over the new target) is now waited
-  for, up to `COOL_TIMEOUT`, instead of skipping the bed = chamber pair.
+  target is accepted rather than waited on.
 - The thermal sweep runs the chamber fan at full speed while it waits for
   the chamber to cool to a lower set, and puts it back to its previous
   speed afterwards (`cool_fan` / `cool_fan_speed` in `[ff_thermal_mesh]`).

@@ -1321,27 +1321,11 @@ class FFThermalMesh:
                 # The bed cannot be held more than bed_tolerance below the
                 # air. A chamber a hair over the bed target still holds the
                 # bed within that, and _wait_for_temps accepts it.
-                limit = bed + self.bed_tolerance
-                if ch is not None and ch > limit:
-                    # Further over, on a heated set whose own target is at
-                    # or below this bed target, the chamber is still coming
-                    # down from the set before (the cool-down to a new set
-                    # stops at target + chamber_tolerance, the bed == chamber
-                    # pair needs target + bed_tolerance), or the previous,
-                    # hotter bed is holding it up. Its heater is set lower,
-                    # so it gets there: wait, with the bed at its own target,
-                    # rather than skip a pair the plan says is reachable.
-                    if chamber > 0. and bed >= chamber:
-                        self.status['phase'] = 'cooling'
-                        self._set_bed(bed)
-                        if self._cool_chamber(limit, job['cool_timeout']):
-                            ch = self._chamber_temp(self.reactor.monotonic())
-                        self.status['phase'] = 'heating'
-                    if ch is not None and ch > limit:
-                        self._skip(data, chamber, bed,
-                                   "more than %.1f below the chamber's %.1f"
-                                   % (self.bed_tolerance, ch))
-                        continue
+                if ch is not None and ch > bed + self.bed_tolerance:
+                    self._skip(data, chamber, bed,
+                               "more than %.1f below the chamber's %.1f"
+                               % (self.bed_tolerance, ch))
+                    continue
                 self._set_bed(bed)
                 self._wait_for_temps(bed, chamber)
                 reached = self.reactor.monotonic()
