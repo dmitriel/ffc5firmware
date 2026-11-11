@@ -53,7 +53,7 @@ chamber 40: bed 110 → … → 60
   `CHAMBER_STEP_SOAK` to soak it again at every chamber step.
 * **Down to the next chamber target**, the bed is switched off, the chamber
   fan (`cool_fan`) runs at full speed, and the sweep waits for the chamber
-  to fall to within `chamber_tolerance` of the new target; the fan then goes
+  to fall to within `temp_tolerance` of the new target; the fan then goes
   back to the speed it had. If it has not within `COOL_TIMEOUT` — the enclosure holds heat
   better than expected — that whole set is skipped and the sweep moves on to
   the next lower one.
@@ -62,19 +62,19 @@ chamber 40: bed 110 → … → 60
   `SOAK`.
 * **The bed is never below the chamber.** Bed targets below the chamber
   target are left out of the plan; at each pair, a bed target more than
-  `bed_tolerance` (1 °C) below the chamber's measured temperature is skipped
+  `temp_tolerance` (1 °C) below the chamber's measured temperature is skipped
   too. A bed cannot be held below the air around it, but a chamber a little
   over the bed target — a hot bed easily carries it a few tenths past its
   own — only holds the bed a little warm: that pair runs, the bed is
-  accepted up to the chamber's temperature plus `bed_tolerance`, and the
+  accepted up to the chamber's temperature plus `temp_tolerance`, and the
   map records the temperatures actually measured.
 
 Skipped sets and pairs are listed under `"skipped"` in the map file and by
 `THERMAL_MESH_STATUS`. The map that results is triangular rather than a full
 grid; the analysis below does not need a full grid.
 
-At every pair it waits for the bed (±`bed_tolerance`) and the chamber (at
-least target − `chamber_tolerance`; a hot bed may carry the chamber past its
+At every pair it waits for the bed (±`temp_tolerance`) and the chamber (at
+least target − `temp_tolerance`; a hot bed may carry the chamber past its
 target, which is recorded rather than waited out), soaks, then probes full
 meshes until one verifies the one before it (next section), however many
 that takes; `THERMAL_MESH_ABORT` stops it. It stores the average of the
@@ -315,8 +315,7 @@ section with just that option at the end of `printer.cfg`.
 | `bed_heater` | `heater_bed` | |
 | `chamber_heater` | `chamber_heater` | Set through `SET_HEATER_TEMPERATURE`, so the chamber fan coupling applies. |
 | `chamber_sensor` | (heater, then `temperature_sensor chamber`) | Object to read the chamber temperature from. |
-| `bed_tolerance` | 1.0 | °C either side of the bed target. |
-| `chamber_tolerance` | 2.0 | °C below the chamber target. |
+| `temp_tolerance` | 1.0 | °C, for both heaters: the bed either side of its target, the chamber below its target, and how close a cool-down to a lower chamber set has to get. One number, so a cool-down always ends where the set's bed = chamber pair can start. (`bed_tolerance` and `chamber_tolerance` are still accepted; the bed's stands in when `temp_tolerance` is unset.) |
 | `heat_timeout` | 5400 | Seconds to reach a pair's targets before the sweep stops. |
 | `cool_timeout` | 3600 | Seconds the chamber has to cool to a lower target before that set is skipped (`COOL_TIMEOUT`). |
 | `cool_fan` | `chamber_fan` | `[fan_generic]` run while the sweep waits for the chamber to cool, then put back to its previous speed. Empty: no fan. |

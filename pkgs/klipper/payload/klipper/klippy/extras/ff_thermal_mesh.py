@@ -833,9 +833,17 @@ class FFThermalMesh:
         self.bed_heater = config.get('bed_heater', 'heater_bed')
         self.chamber_heater = config.get('chamber_heater', 'chamber_heater')
         self.chamber_sensor = config.get('chamber_sensor', None)
-        self.bed_tolerance = config.getfloat('bed_tolerance', 1., above=0.)
-        self.chamber_tolerance = config.getfloat(
-            'chamber_tolerance', 2., above=0.)
+        # ONE tolerance for both heaters. With two -- the chamber let off
+        # its cool-down at target + 2 while the bed == chamber pair allowed
+        # only 1 -- that pair was skipped every time the sweep reached it
+        # straight after a cool-down. bed_tolerance / chamber_tolerance are
+        # still read, so a printer.cfg that sets them keeps starting; the
+        # first of them stands in for temp_tolerance when that is unset.
+        legacy = [config.getfloat(o, None, above=0.)
+                  for o in ('bed_tolerance', 'chamber_tolerance')]
+        legacy = [v for v in legacy if v is not None]
+        self.tolerance = config.getfloat(
+            'temp_tolerance', legacy[0] if legacy else 1., above=0.)
         self.heat_timeout = config.getfloat('heat_timeout', 5400., above=0.)
         self.cool_timeout = config.getfloat('cool_timeout', 3600., above=0.)
         # A [fan_generic] run while the sweep waits for the chamber to cool,
@@ -1072,16 +1080,16 @@ class FFThermalMesh:
             # above the target, so as high as the chamber (+ tolerance) is
             # accepted. The temperatures actually measured are what the
             # map records and the analysis uses.
-            upper = bed + self.bed_tolerance
+            upper = bed + self.tolerance
             if ch is not None:
-                upper = max(upper, ch + self.bed_tolerance)
+                upper = max(upper, ch + self.tolerance)
             ok = (bed_now is not None
-                  and bed - self.bed_tolerance <= bed_now <= upper)
+                  and bed - self.tolerance <= bed_now <= upper)
             if chamber > 0.:
                 # The chamber can only be heated: a hot bed may carry it past
                 # the target, which is recorded rather than waited out.
                 ok = ok and ch is not None and ch >= chamber - \
-                    self.chamber_tolerance
+                    self.tolerance
             if ok:
                 return
             if now - start > self.heat_timeout:
@@ -1299,17 +1307,17 @@ class FFThermalMesh:
                     now = self.reactor.monotonic()
                     ch = self._chamber_temp(now)
                     if (chamber > 0. and ch is not None
-                            and ch > chamber + self.chamber_tolerance):
+                            and ch > chamber + self.tolerance):
                         # Down to a cooler set: the bed off so nothing
                         # holds the chamber up while it cools.
                         self.status['phase'] = 'cooling'
                         self._set_bed(0.)
                         if not self._cool_chamber(
-                                chamber + self.chamber_tolerance,
+                                chamber + self.tolerance,
                                 job['cool_timeout']):
                             self._skip(data, chamber, None,
                                        "did not cool below %.1f in %ds"
-                                       % (chamber + self.chamber_tolerance,
+                                       % (chamber + self.tolerance,
                                           job['cool_timeout']))
                             skipped_chamber = chamber
                             current = chamber
@@ -1318,13 +1326,13 @@ class FFThermalMesh:
                     current = chamber
                 now = self.reactor.monotonic()
                 ch = self._chamber_temp(now)
-                # The bed cannot be held more than bed_tolerance below the
+                # The bed cannot be held more than temp_tolerance below the
                 # air. A chamber a hair over the bed target still holds the
                 # bed within that, and _wait_for_temps accepts it.
-                if ch is not None and ch > bed + self.bed_tolerance:
+                if ch is not None and ch > bed + self.tolerance:
                     self._skip(data, chamber, bed,
                                "more than %.1f below the chamber's %.1f"
-                               % (self.bed_tolerance, ch))
+                               % (self.tolerance, ch))
                     continue
                 self._set_bed(bed)
                 self._wait_for_temps(bed, chamber)

@@ -645,7 +645,7 @@ def test_the_sweep_maps_every_pair_until_it_settles(tm, tmp_path):
     printer = SweepPrinter()
     obj = tm.FFThermalMesh(Config(printer, data_file=str(path),
                                   max_samples=6, min_point_spacing=60.,
-                                  bed_tolerance=1., chamber_tolerance=2.,
+                                  temp_tolerance=1.,
                                   heat_timeout=100.))
     printer.handlers["klippy:connect"]()
     obj.probe_helper.z_at = repeatable_probe()
@@ -684,7 +684,7 @@ def _sweep(tm, tmp_path, printer=None, max_samples=6, _hook=None,
                                   data_file=str(tmp_path / "thermal_mesh.json"),
                                   max_samples=max_samples,
                                   min_point_spacing=60.,
-                                  bed_tolerance=1., chamber_tolerance=2.,
+                                  temp_tolerance=1.,
                                   heat_timeout=100., cool_timeout=3600.))
     printer.handlers["klippy:connect"]()
     obj.probe_helper.z_at = repeatable_probe()
@@ -781,7 +781,7 @@ def test_a_resumed_sweep_skips_the_stored_pairs(tm, tmp_path):
     printer = SweepPrinter()
     obj = tm.FFThermalMesh(Config(printer, data_file=str(path),
                                   max_samples=6, min_point_spacing=60.,
-                                  bed_tolerance=1., chamber_tolerance=2.,
+                                  temp_tolerance=1.,
                                   heat_timeout=100.))
     printer.handlers["klippy:connect"]()
     obj.probe_helper.z_at = repeatable_probe()
@@ -1173,8 +1173,8 @@ class CoolingChamber:
 
 
 def _bed_equals_chamber_sweep(tm, tmp_path, floor=0.):
-    # 65/65, then the 60 set: the chamber comes down from 65 to the set
-    # (60 + chamber_tolerance = 62).
+    # 65/65, then the 60 set: the chamber comes down slowly from 65, and the
+    # cool-down to the set ends at 60 + temp_tolerance.
     printer = SweepPrinter()
     chamber = CoolingChamber(printer.clock, rate=0.002, floor=floor)
     printer.heaters["chamber_heater"] = chamber
@@ -1184,13 +1184,39 @@ def _bed_equals_chamber_sweep(tm, tmp_path, floor=0.):
                   MAX_SOAK=0, CHAMBER_SOAK=0)
 
 
-def test_a_chamber_still_too_warm_for_the_bed_skips_the_pair(tm, tmp_path):
-    # No second wait for the bed == chamber pair: one cool-down per set.
+def test_the_bed_equals_chamber_pair_runs_straight_after_a_cool_down(
+        tm, tmp_path):
+    # Was "skipping chamber 60.0 bed 60.0: below the chamber's 62.0": the
+    # cool-down to the set stopped at 60 + 2 (chamber_tolerance) and the
+    # pair allowed 60 + 1 (bed_tolerance). One tolerance: the cool-down
+    # ends where the pair can start.
+    obj, printer, data, _ = _bed_equals_chamber_sweep(tm, tmp_path)
+    assert obj.status["state"] == "done", obj.status
+    assert [(e["chamber"], e["bed"]) for e in data["entries"]] == [
+        (65., 65.), (60., 65.), (60., 60.)]
+    assert not data.get("skipped")
+
+
+def test_a_chamber_that_will_not_cool_to_the_tolerance_skips_its_set(
+        tm, tmp_path):
     obj, printer, data, _ = _bed_equals_chamber_sweep(tm, tmp_path,
                                                       floor=61.8)
     assert obj.status["state"] == "done", obj.status
     assert [(k["chamber"], k["bed"]) for k in data["skipped"]] == [
-        (60., 60.)]
+        (60., None)]
+
+
+def test_the_old_tolerance_options_still_load(tm, tmp_path):
+    # A printer.cfg that restates bed_tolerance / chamber_tolerance must
+    # keep starting; the bed's stands in for temp_tolerance.
+    obj = tm.FFThermalMesh(Config(SweepPrinter(), bed_tolerance=0.5,
+                                  chamber_tolerance=2.,
+                                  data_file=str(tmp_path / "m.json")))
+    assert obj.tolerance == 0.5
+    obj = tm.FFThermalMesh(Config(SweepPrinter(), bed_tolerance=0.5,
+                                  temp_tolerance=1.5,
+                                  data_file=str(tmp_path / "m.json")))
+    assert obj.tolerance == 1.5
 
 
 def test_the_chamber_fan_runs_while_the_chamber_cools_then_goes_back(
