@@ -587,6 +587,11 @@ class SweepPrinter(Printer):
         self.heaters = {"heater_bed": Heater(), "chamber_heater": Heater()}
         self.probes = []
         self.ratio, self.mesh_seconds = 4., 100.
+        self.drift = 0.05                     # mm, first mesh vs settled
+        # Each mesh is homed (G28 Z on the plate) before it is probed, so
+        # the homing touch's error shifts all of its nodes alike. Cycled.
+        self.home_noise = [0.]
+        self.extra_objects = {}
         self.gcode.run_script = self.run_script
 
     def get_reactor(self):
@@ -603,6 +608,7 @@ class SweepPrinter(Printer):
             "toolhead": types.SimpleNamespace(
                 get_status=lambda t: {"homed_axes": "xyz"}),
             "idle_timeout": types.SimpleNamespace(idle_timeout=600.)}
+        objects.update(self.extra_objects)
         return objects.get(name, default)
 
     def run_script(self, script):
@@ -620,9 +626,15 @@ class SweepPrinter(Printer):
             key = (c, b)
             n = sum(1 for k in self.probes if k == key)
             self.probes.append(key)
-            drift = 0.05 / (self.ratio ** n)  # quarters with every sample
+            drift = self.drift / (self.ratio ** n)  # quarters each sample
+            home = self.home_noise[(len(self.probes) - 1)
+                                   % len(self.home_noise)]
             self.clock.t += self.mesh_seconds
-            m = [[z + drift for z in row] for row in matrix_at(c, b)]
+            # The plate settles by changing SHAPE: a uniform rise is homed
+            # away by the G28 Z before every mesh, on the printer as here.
+            m = [[z + drift * (1. if (r + k) % 2 else -1.) + home
+                  for k, z in enumerate(row)]
+                 for r, row in enumerate(matrix_at(c, b))]
             self.bed_mesh.mesh = types.SimpleNamespace(
                 get_probed_matrix=lambda: m,
                 get_mesh_params=lambda: PARAMS)
@@ -633,7 +645,7 @@ def test_the_sweep_maps_every_pair_until_it_settles(tm, tmp_path):
     printer = SweepPrinter()
     obj = tm.FFThermalMesh(Config(printer, data_file=str(path),
                                   max_samples=6, min_point_spacing=60.,
-                                  bed_tolerance=1., chamber_tolerance=2.,
+                                  temp_tolerance=1.,
                                   heat_timeout=100.))
     printer.handlers["klippy:connect"]()
     obj.probe_helper.z_at = repeatable_probe()
@@ -645,18 +657,18 @@ def test_the_sweep_maps_every_pair_until_it_settles(tm, tmp_path):
     assert obj.status["state"] == "done", obj.status
     pairs = [(e["chamber"], e["bed"]) for e in data["entries"]]
     assert pairs == tm.sweep_plan([60., 80., 100.], [30., 40., 50.])
-    # Each sample sits 0.0375, 0.0094, 0.0023, 0.0006 mm below the one
-    # before. Against a probe sigma of 0.0021 over 25 nodes the average of
-    # 0.0023 is still a real difference; 0.0006 is not.
-    assert {e["samples"] for e in data["entries"]} == {5}
+    # Each sample's nodes move 0.0375, 0.0094, 0.0023 mm (half of them up,
+    # half down) from the one before. Against a probe sigma of 0.0021 a
+    # 0.0094 mm change in shape is real; 0.0023 mm at every node is not.
+    assert {e["samples"] for e in data["entries"]} == {4}
     assert all(e["converged"] for e in data["entries"])
     check = data["entries"][0]["verification"]
-    assert check["identical"] and check["dof"] == 9
-    assert check["sigma"] == pytest.approx(0.002 * (10 / 9) ** .5)
-    # The precision touches, ten at the middle of the mesh, after each
-    # verification mesh.
-    assert printer.gcode.scripts.count(
-        "_THERMAL_MESH_PRECISION X=100.000 Y=100.000 SAMPLES=10") == 9 * 4
+    # Four readings at each of nine nodes: 9 x 3 degrees of freedom. The
+    # stub's readings alternate +/-0.002, so each node's four are +-+- .
+    assert check["identical"] and check["dof"] == 27
+    assert check["sigma"] == pytest.approx(0.002 * (4 / 3) ** .5)
+    # One precision measurement after each verification mesh.
+    assert printer.gcode.scripts.count("_THERMAL_MESH_PRECISION") == 9 * 3
     assert len(data["analysis"]["points"]) == 4
     # Heaters are off and the idle timeout is back afterwards.
     assert printer.heaters["heater_bed"].target == 0.
@@ -664,20 +676,23 @@ def test_the_sweep_maps_every_pair_until_it_settles(tm, tmp_path):
     assert printer.gcode.scripts[-1] == "SET_IDLE_TIMEOUT TIMEOUT=600"
 
 
-def _sweep(tm, tmp_path, printer=None, max_samples=6, **params):
+def _sweep(tm, tmp_path, printer=None, max_samples=6, _hook=None,
+           **params):
     printer = printer or SweepPrinter()
     tmp_path.mkdir(parents=True, exist_ok=True)
     obj = tm.FFThermalMesh(Config(printer,
                                   data_file=str(tmp_path / "thermal_mesh.json"),
                                   max_samples=max_samples,
                                   min_point_spacing=60.,
-                                  bed_tolerance=1., chamber_tolerance=2.,
+                                  temp_tolerance=1.,
                                   heat_timeout=100., cool_timeout=3600.))
     printer.handlers["klippy:connect"]()
     obj.probe_helper.z_at = repeatable_probe()
     soaks = []
     sleep = obj._sleep
     obj._sleep = lambda seconds: soaks.append(seconds) or sleep(seconds)
+    if _hook is not None:
+        _hook(obj)
     printer.gcode.commands["THERMAL_MESH_SWEEP"](Gcmd(**params))
     data = json.loads((tmp_path / "thermal_mesh.json").read_text())
     return obj, printer, data, soaks
@@ -697,14 +712,14 @@ def test_the_chamber_soaks_once_and_each_set_starts_with_a_long_bed_soak(
     assert soaks == [3000., 300., 300.,
                      1200., 300., 300.,
                      1200., 300., 300.]
-    # Verified on meshes 4 and 5; three 100 s meshes went before the 4th.
+    # Verified on meshes 3 and 4; two 100 s meshes went before the 3rd.
     assert [e["soak_time"] for e in data["entries"]] == [
-        s + 300. for s in soaks]
+        s + 200. for s in soaks]
 
 
 def test_without_a_limit_it_verifies_for_as_long_as_it_takes(tm, tmp_path):
     printer = SweepPrinter()
-    printer.ratio = 1.5                  # a plate that settles slowly
+    printer.ratio, printer.drift = 1.5, 0.5   # a plate that settles slowly
     obj, printer, data, soaks = _sweep(
         tm, tmp_path, printer, max_samples=0, BED_MIN=60, BED_MAX=60,
         SOAK=0, MAX_SOAK=0, CHAMBER_SOAK=600)
@@ -766,7 +781,7 @@ def test_a_resumed_sweep_skips_the_stored_pairs(tm, tmp_path):
     printer = SweepPrinter()
     obj = tm.FFThermalMesh(Config(printer, data_file=str(path),
                                   max_samples=6, min_point_spacing=60.,
-                                  bed_tolerance=1., chamber_tolerance=2.,
+                                  temp_tolerance=1.,
                                   heat_timeout=100.))
     printer.handlers["klippy:connect"]()
     obj.probe_helper.z_at = repeatable_probe()
@@ -994,3 +1009,253 @@ def test_a_chamber_soak_at_every_chamber_step_is_optional(tm, tmp_path):
     _, _, _, soaks = _sweep(tm, tmp_path / "on", CHAMBER_STEP_SOAK=2400,
                             **params)
     assert soaks == [3000., 300., 300., 2400., 300., 300.]
+
+
+def test_homing_noise_does_not_stop_a_settled_plate_verifying(tm, tmp_path):
+    # Every mesh is homed on the plate first, and each homing touch lands a
+    # little differently: here +/-3 um, against a probe sigma of ~2 um. That
+    # moves every node of a mesh alike. Judged as if each node were
+    # independent, the average error never passed and the sweep probed on
+    # forever; it has to be judged as the one shared touch it is.
+    printer = SweepPrinter()
+    printer.home_noise = [0.003, -0.003]
+    obj, printer, data, _ = _sweep(
+        tm, tmp_path, printer=printer, max_samples=8, BED_MIN=60, BED_MAX=60,
+        SOAK=0, MAX_SOAK=0, CHAMBER_SOAK=0)
+    (entry,) = data["entries"]
+    assert entry["converged"] is True, entry["verification"]
+    assert entry["verification"]["shared_reference"] is True
+    assert entry["samples"] < 8
+
+
+def test_pooled_precision_ignores_how_high_each_point_is(tm):
+    sigma, dof = tm.pooled_std([[1.0, 1.002, 0.998], [5.0, 5.002, 4.998]])
+    assert dof == 4
+    assert sigma == pytest.approx(0.002)
+    with pytest.raises(ValueError):
+        tm.pooled_std([[1.0], [2.0]])
+
+
+def test_precision_nodes_spread_over_the_mesh(tm):
+    params = dict(PARAMS, x_count=10, y_count=10, min_x=13., max_x=263.,
+                  min_y=4., max_y=254.)
+    nodes = tm.precision_nodes(params)
+    assert len(nodes) == 9
+    assert {x for x, _ in nodes} == {13., 263., 13. + 4 * 250. / 9}
+    assert {y for _, y in nodes} == {4., 254., 4. + 4 * 250. / 9}
+
+
+def test_precision_reads_like_a_mesh_node_round_the_mesh(tm, tmp_path):
+    # The probe takes SAMPLES (and its other settings) off the command it
+    # is handed. The precision command used to pass SAMPLES=10, so every
+    # reading was the median of ten touches -- and all of them at the
+    # middle, the bed's quietest spot. It must pass nothing, and read nine
+    # nodes in turn.
+    printer = SweepPrinter()
+    seen = []
+    obj, printer, data, _ = _sweep(
+        tm, tmp_path, printer=printer, BED_MIN=60, BED_MAX=60, SOAK=0,
+        MAX_SOAK=0, CHAMBER_SOAK=0,
+        _hook=lambda obj: _record_probes(obj, seen))
+    precision = [(params, points) for params, points in seen
+                 if len(points) == 9 * 4]
+    assert precision, seen
+    for params, points in precision:
+        assert params == {}
+        assert points[:9] == points[9:18] == points[18:27]
+        assert len(set(points[:9])) == 9
+
+
+def _record_probes(obj, seen):
+    start = obj.probe_helper.start_probe
+
+    def recording(gcmd):
+        seen.append((dict(gcmd.params), list(obj.probe_helper.points)))
+        start(gcmd)
+    obj.probe_helper.start_probe = recording
+
+
+def test_saving_the_map_never_holds_up_the_reactor(tm, tmp_path,
+                                                    monkeypatch):
+    # The map is rewritten whole after every pair, and late in a sweep that
+    # took long enough on the printer to stop klippy servicing the MCU
+    # ("Timer too close"). The write runs in a thread: _save returns at once
+    # even while the encode is stuck, and a read waits for it to land.
+    import threading
+    printer = SweepPrinter()
+    obj = tm.FFThermalMesh(Config(printer,
+                                  data_file=str(tmp_path / "map.json")))
+    gate, started = threading.Event(), threading.Event()
+    real_dump = tm.json.dump
+
+    def slow_dump(data, f, **kw):
+        started.set()
+        assert gate.wait(5)
+        real_dump(data, f, **kw)
+    monkeypatch.setattr(tm.json, "dump", slow_dump)
+    data = {"version": tm.DATA_VERSION, "mesh_params": None, "entries": []}
+    obj._save(data)
+    assert started.wait(5)
+    data["entries"].append({"bed": 60.})     # the sweep carries on
+    obj._save(data)                          # still returns at once
+    assert not (tmp_path / "map.json").exists()
+    gate.set()
+    loaded = obj._load()                     # waits for the writer
+    assert loaded["entries"] == [{"bed": 60.}]
+    assert obj._save_thread is None
+
+
+class BedHeldByChamber(Heater):
+    """A bed with no cooling: it cannot read below the chamber's air."""
+
+    def __init__(self, chamber):
+        super().__init__()
+        self.chamber = chamber
+
+    def get_status(self, eventtime):
+        air = self.chamber.get_status(eventtime)["temperature"]
+        return {"temperature": max(self.target, air)}
+
+
+@pytest.mark.parametrize("air", [60.0, 60.1, 60.8])
+def test_a_chamber_a_little_over_the_bed_target_does_not_skip_it(
+        tm, tmp_path, air):
+    # Bed 60 with the chamber at 60.0-60.8: a hot bed carried the chamber
+    # a hair past its target. These used to be skipped as "below the
+    # chamber"; they run, and the bed the chamber holds a little warm is
+    # accepted.
+    printer = SweepPrinter()
+    chamber = SlowChamber(floor=air)
+    printer.heaters["chamber_heater"] = chamber
+    printer.heaters["heater_bed"] = BedHeldByChamber(chamber)
+    obj, printer, data, _ = _sweep(
+        tm, tmp_path, printer, BED_MIN=60, BED_MAX=60, SOAK=0, MAX_SOAK=0,
+        CHAMBER_SOAK=0)
+    assert obj.status["state"] == "done", obj.status
+    assert [e["bed"] for e in data["entries"]] == [60.]
+    assert not data.get("skipped")
+    assert data["entries"][0]["bed_measured"][0] == pytest.approx(air)
+
+
+def test_a_chamber_well_over_the_bed_target_still_skips_it(tm, tmp_path):
+    printer = SweepPrinter()
+    printer.heaters["chamber_heater"] = SlowChamber(floor=61.5)
+    obj, printer, data, _ = _sweep(
+        tm, tmp_path, printer, BED_MIN=60, BED_MAX=60, SOAK=0, MAX_SOAK=0,
+        CHAMBER_SOAK=0)
+    assert [(k["chamber"], k["bed"]) for k in data["skipped"]] == [(0., 60.)]
+
+
+class CoolingChamber:
+    """Reaches a higher target at once, but after a lower one falls only
+    `rate` degC/s from where it was -- down to `floor` at the least."""
+
+    def __init__(self, clock, rate, floor=0.):
+        self.clock, self.rate, self.floor = clock, rate, floor
+        self._target, self._from, self._since = 0., 0., 0.
+
+    def _temp(self, t):
+        cooled = self._from - self.rate * (t - self._since)
+        return max(self._target, self.floor, cooled)
+
+    @property
+    def target(self):
+        return self._target
+
+    @target.setter
+    def target(self, value):
+        now = self.clock.t
+        self._from, self._since = self._temp(now), now
+        self._target = value
+
+    def get_status(self, eventtime):
+        return {"temperature": self._temp(self.clock.t)}
+
+
+def _bed_equals_chamber_sweep(tm, tmp_path, floor=0.):
+    # 65/65, then the 60 set: the chamber comes down slowly from 65, and the
+    # cool-down to the set ends at 60 + temp_tolerance.
+    printer = SweepPrinter()
+    chamber = CoolingChamber(printer.clock, rate=0.002, floor=floor)
+    printer.heaters["chamber_heater"] = chamber
+    printer.heaters["heater_bed"] = BedHeldByChamber(chamber)
+    return _sweep(tm, tmp_path, printer, BED_MIN=60, BED_MAX=65, BED_STEP=5,
+                  CHAMBER_MIN=60, CHAMBER_MAX=65, CHAMBER_STEP=5, SOAK=0,
+                  MAX_SOAK=0, CHAMBER_SOAK=0)
+
+
+def test_the_bed_equals_chamber_pair_runs_straight_after_a_cool_down(
+        tm, tmp_path):
+    # Was "skipping chamber 60.0 bed 60.0: below the chamber's 62.0": the
+    # cool-down to the set stopped at 60 + 2 (chamber_tolerance) and the
+    # pair allowed 60 + 1 (bed_tolerance). One tolerance: the cool-down
+    # ends where the pair can start.
+    obj, printer, data, _ = _bed_equals_chamber_sweep(tm, tmp_path)
+    assert obj.status["state"] == "done", obj.status
+    assert [(e["chamber"], e["bed"]) for e in data["entries"]] == [
+        (65., 65.), (60., 65.), (60., 60.)]
+    assert not data.get("skipped")
+
+
+def test_a_chamber_that_will_not_cool_to_the_tolerance_skips_its_set(
+        tm, tmp_path):
+    obj, printer, data, _ = _bed_equals_chamber_sweep(tm, tmp_path,
+                                                      floor=61.8)
+    assert obj.status["state"] == "done", obj.status
+    assert [(k["chamber"], k["bed"]) for k in data["skipped"]] == [
+        (60., None)]
+
+
+def test_the_old_tolerance_options_still_load(tm, tmp_path):
+    # A printer.cfg that restates bed_tolerance / chamber_tolerance must
+    # keep starting; the bed's stands in for temp_tolerance.
+    obj = tm.FFThermalMesh(Config(SweepPrinter(), bed_tolerance=0.5,
+                                  chamber_tolerance=2.,
+                                  data_file=str(tmp_path / "m.json")))
+    assert obj.tolerance == 0.5
+    obj = tm.FFThermalMesh(Config(SweepPrinter(), bed_tolerance=0.5,
+                                  temp_tolerance=1.5,
+                                  data_file=str(tmp_path / "m.json")))
+    assert obj.tolerance == 1.5
+
+
+def test_the_chamber_fan_runs_while_the_chamber_cools_then_goes_back(
+        tm, tmp_path):
+    printer = SweepPrinter()
+    chamber = CoolingChamber(printer.clock, rate=0.002)
+    printer.heaters["chamber_heater"] = chamber
+    printer.heaters["heater_bed"] = BedHeldByChamber(chamber)
+    fan = types.SimpleNamespace(get_status=lambda t: {"speed": 0.3})
+    printer.extra_objects["fan_generic chamber_fan"] = fan
+    obj, printer, data, _ = _sweep(
+        tm, tmp_path, printer, BED_MIN=60, BED_MAX=65, BED_STEP=5,
+        CHAMBER_MIN=60, CHAMBER_MAX=65, CHAMBER_STEP=5, SOAK=0, MAX_SOAK=0,
+        CHAMBER_SOAK=0)
+    assert obj.status["state"] == "done", obj.status
+    fans = [s for s in printer.gcode.scripts if s.startswith("SET_FAN_SPEED")]
+    # One cool-down, to the 60 set: full speed, then the 0.3 it had.
+    assert fans == ["SET_FAN_SPEED FAN=chamber_fan SPEED=1.000",
+                    "SET_FAN_SPEED FAN=chamber_fan SPEED=0.300"]
+    scripts = printer.gcode.scripts
+    on = scripts.index(fans[0])
+    assert "BED_MESH_CALIBRATE" not in scripts[on:scripts.index(fans[1])]
+
+
+def test_no_cool_fan_configured_runs_no_fan(tm, tmp_path):
+    printer = SweepPrinter()
+    chamber = CoolingChamber(printer.clock, rate=0.002)
+    printer.heaters["chamber_heater"] = chamber
+    printer.heaters["heater_bed"] = BedHeldByChamber(chamber)
+    printer.extra_objects["fan_generic chamber_fan"] = types.SimpleNamespace(
+        get_status=lambda t: {"speed": 0.})
+    obj = tm.FFThermalMesh(Config(printer, cool_fan="",
+                                  data_file=str(tmp_path / "m.json"),
+                                  cool_timeout=3600., heat_timeout=100.))
+    printer.handlers["klippy:connect"]()
+    obj.probe_helper.z_at = repeatable_probe()
+    printer.gcode.commands["THERMAL_MESH_SWEEP"](Gcmd(
+        BED_MIN=60, BED_MAX=65, BED_STEP=5, CHAMBER_MIN=60, CHAMBER_MAX=65,
+        CHAMBER_STEP=5, SOAK=0, MAX_SOAK=0, CHAMBER_SOAK=0))
+    assert not any(s.startswith("SET_FAN_SPEED")
+                   for s in printer.gcode.scripts)
+

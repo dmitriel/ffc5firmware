@@ -55,6 +55,7 @@ import json
 import logging
 import math
 import os
+import threading
 
 from . import bed_mesh as bed_mesh_module
 from . import probe as probe_module
@@ -179,6 +180,34 @@ def sample_std(values):
         raise ValueError("precision needs at least two readings")
     mean = sum(values) / n
     return math.sqrt(sum((v - mean) ** 2 for v in values) / (n - 1)), n - 1
+
+
+def pooled_std(groups):
+    """(standard deviation, degrees of freedom) pooled over several points,
+    each read repeatedly: the spread of every point about its own mean.
+    Points whose true heights differ do not inflate it."""
+    ss, dof = 0., 0
+    for values in groups:
+        if len(values) < 2:
+            continue
+        mean = sum(values) / len(values)
+        ss += sum((v - mean) ** 2 for v in values)
+        dof += len(values) - 1
+    if dof < 1:
+        raise ValueError("precision needs a point read at least twice")
+    return math.sqrt(ss / dof), dof
+
+
+def precision_nodes(params):
+    """Nine mesh nodes, a 3 x 3 spread over the mesh: its corners, edge
+    middles and middle. A probe is not equally repeatable everywhere over
+    the bed -- on the Creator 5 the edges read far noisier than the middle
+    -- so its noise is measured where the mesh is, not at one spot."""
+    rows = sorted(set([0, (params['y_count'] - 1) // 2,
+                       params['y_count'] - 1]))
+    cols = sorted(set([0, (params['x_count'] - 1) // 2,
+                       params['x_count'] - 1]))
+    return [node_xy(params, r, c) for r in rows for c in cols]
 
 
 def verify_meshes(a, b, sigma, dof, confidence=0.95, shared_reference=False):
@@ -804,18 +833,32 @@ class FFThermalMesh:
         self.bed_heater = config.get('bed_heater', 'heater_bed')
         self.chamber_heater = config.get('chamber_heater', 'chamber_heater')
         self.chamber_sensor = config.get('chamber_sensor', None)
-        self.bed_tolerance = config.getfloat('bed_tolerance', 1., above=0.)
-        self.chamber_tolerance = config.getfloat(
-            'chamber_tolerance', 2., above=0.)
+        # ONE tolerance for both heaters. With two -- the chamber let off
+        # its cool-down at target + 2 while the bed == chamber pair allowed
+        # only 1 -- that pair was skipped every time the sweep reached it
+        # straight after a cool-down. bed_tolerance / chamber_tolerance are
+        # still read, so a printer.cfg that sets them keeps starting; the
+        # first of them stands in for temp_tolerance when that is unset.
+        legacy = [config.getfloat(o, None, above=0.)
+                  for o in ('bed_tolerance', 'chamber_tolerance')]
+        legacy = [v for v in legacy if v is not None]
+        self.tolerance = config.getfloat(
+            'temp_tolerance', legacy[0] if legacy else 1., above=0.)
         self.heat_timeout = config.getfloat('heat_timeout', 5400., above=0.)
         self.cool_timeout = config.getfloat('cool_timeout', 3600., above=0.)
+        # A [fan_generic] run while the sweep waits for the chamber to cool,
+        # then put back to its previous speed. Empty: none.
+        self.cool_fan = (config.get('cool_fan', 'chamber_fan') or '').strip()
+        self.cool_fan_speed = config.getfloat('cool_fan_speed', 1.,
+                                              minval=0., maxval=1.)
         # 0: keep verifying until a pair of meshes passes (ABORT stops it).
         self.max_samples = config.getint('max_samples', 0, minval=0)
         if self.max_samples == 1:
             raise config.error("ff_thermal_mesh: max_samples is 0 (no limit) "
                                "or at least 2: a mesh needs one to verify it")
-        self.precision_samples = config.getint('precision_samples', 10,
-                                               minval=3)
+        # Readings of EACH of the nine precision nodes, per verification.
+        self.precision_samples = config.getint('precision_samples', 4,
+                                               minval=2)
         self.confidence = config.getfloat('confidence', 0.95, minval=0.5,
                                           maxval=0.999)
         self.max_probe_sigma = config.getfloat('max_probe_sigma', 0.01,
@@ -853,6 +896,10 @@ class FFThermalMesh:
         self.printer.register_event_handler('klippy:shutdown',
                                             self._handle_shutdown)
         self._precision = None
+        self._precision_plan = []
+        self._save_lock = threading.Lock()
+        self._save_pending = None
+        self._save_thread = None
         self.gcode.register_command('_THERMAL_MESH_PRECISION',
                                     self.cmd__THERMAL_MESH_PRECISION)
         for name in ('SWEEP', 'ABORT', 'STATUS', 'ANALYZE', 'APPLY'):
@@ -880,6 +927,7 @@ class FFThermalMesh:
 
     # -- data file -------------------------------------------------------
     def _load(self):
+        self._wait_saved()
         try:
             with open(self.data_file) as f:
                 data = json.load(f)
@@ -894,11 +942,64 @@ class FFThermalMesh:
                                       DATA_VERSION))
         return data
 
+    # -- saving the map ---------------------------------------------------
+    #
+    # OFF THE REACTOR. The whole map -- every pair's mesh -- is rewritten
+    # after every pair and every skip, and it grows all sweep. json.dump with
+    # an indent is CPython's pure-Python encoder; on the printer's CPU a
+    # late-sweep map took long enough that klippy stopped servicing the MCU
+    # ("Timer too close", right after a stored pair, a skip and the end of
+    # the plan saved back to back). So the encode and the write run in a
+    # worker thread: pure-Python work there gives the GIL back every few ms
+    # and the reactor keeps running. Only the newest snapshot is written;
+    # each lands whole (written to .tmp, then renamed over the map).
+
     def _save(self, data):
-        tmp = self.data_file + '.tmp'
-        with open(tmp, 'w') as f:
-            json.dump(data, f, indent=1)
-        os.replace(tmp, self.data_file)
+        # Shallow is enough: entries and skips are appended, never edited,
+        # and the analysis is replaced whole.
+        snap = dict((k, list(v) if isinstance(v, list) else v)
+                    for k, v in data.items())
+        with self._save_lock:
+            self._save_pending = snap
+            if self._save_thread is None:
+                self._save_thread = threading.Thread(
+                    target=self._save_worker, name='thermal-mesh-save')
+                self._save_thread.daemon = True
+                self._save_thread.start()
+
+    def _save_worker(self):
+        while True:
+            with self._save_lock:
+                snap, self._save_pending = self._save_pending, None
+                if snap is None:
+                    self._save_thread = None
+                    return
+            try:
+                tmp = self.data_file + '.tmp'
+                with open(tmp, 'w') as f:
+                    json.dump(snap, f, indent=1)
+                os.replace(tmp, self.data_file)
+            except Exception as e:
+                logging.exception("thermal mesh: saving %s", self.data_file)
+                notify = getattr(self.reactor, 'register_async_callback',
+                                 None)
+                if notify is not None:
+                    msg = ("thermal mesh: could not save %s: %s"
+                           % (self.data_file, e))
+                    notify(lambda et, m=msg: self.gcode.respond_info(m))
+
+    def _wait_saved(self, yield_reactor=False):
+        """Until every save so far is on disk. yield_reactor: wait in short
+        reactor pauses (from the sweep), not by blocking the thread."""
+        while True:
+            with self._save_lock:
+                thread = self._save_thread
+            if thread is None:
+                return
+            if yield_reactor:
+                self.reactor.pause(self.reactor.monotonic() + 0.05)
+            else:
+                thread.join()
 
     def _require_map(self, need_points=True):
         data = self._load()
@@ -974,13 +1075,21 @@ class FFThermalMesh:
             self._check_abort()
             now = self.reactor.monotonic()
             bed_now = self._bed_temp(now)
-            ok = bed_now is not None and abs(bed_now - bed) <= self.bed_tolerance
+            ch = self._chamber_temp(now)
+            # A bed has no cooling: air warmer than its target holds it
+            # above the target, so as high as the chamber (+ tolerance) is
+            # accepted. The temperatures actually measured are what the
+            # map records and the analysis uses.
+            upper = bed + self.tolerance
+            if ch is not None:
+                upper = max(upper, ch + self.tolerance)
+            ok = (bed_now is not None
+                  and bed - self.tolerance <= bed_now <= upper)
             if chamber > 0.:
                 # The chamber can only be heated: a hot bed may carry it past
                 # the target, which is recorded rather than waited out.
-                ch = self._chamber_temp(now)
                 ok = ok and ch is not None and ch >= chamber - \
-                    self.chamber_tolerance
+                    self.tolerance
             if ok:
                 return
             if now - start > self.heat_timeout:
@@ -990,19 +1099,38 @@ class FFThermalMesh:
             self.status['remaining'] = 0.
             self.reactor.pause(now + 1.)
 
-    def _cool_chamber(self, chamber, timeout):
-        """Wait for the chamber to fall passively to its (lower) target.
+    def _set_cool_fan(self, speed):
+        self.gcode.run_script('SET_FAN_SPEED FAN=%s SPEED=%.3f'
+                              % (self.cool_fan, speed))
 
-        True once it is within chamber_tolerance above the target, False if
-        it is still above that after timeout seconds. The chamber has no
-        cooling of its own, so this is the only way down.
+    def _cool_chamber(self, limit, timeout):
+        """Wait for the chamber to fall to `limit` degC.
+
+        True once it reads at or below limit, False if it is still above
+        after timeout seconds. The chamber has no heat pump, only cool_fan
+        (chamber_fan by default), which runs at cool_fan_speed for the wait
+        and goes back to the speed it had afterwards.
         """
+        fan = None
+        if self.cool_fan and self.cool_fan_speed > 0.:
+            fan = self.printer.lookup_object('fan_generic ' + self.cool_fan,
+                                             None)
+        if fan is None:
+            return self._wait_chamber_down(limit, timeout)
+        before = fan.get_status(self.reactor.monotonic()).get('speed', 0.)
+        self._set_cool_fan(self.cool_fan_speed)
+        try:
+            return self._wait_chamber_down(limit, timeout)
+        finally:
+            self._set_cool_fan(before)
+
+    def _wait_chamber_down(self, limit, timeout):
         start = self.reactor.monotonic()
         while True:
             self._check_abort()
             now = self.reactor.monotonic()
             ch = self._chamber_temp(now)
-            if ch is None or ch <= chamber + self.chamber_tolerance:
+            if ch is None or ch <= limit:
                 return True
             if now - start > timeout:
                 return False
@@ -1033,26 +1161,36 @@ class FFThermalMesh:
                     "map; start a new sweep" % (key, known[key], params[key]))
 
     def cmd__THERMAL_MESH_PRECISION(self, gcmd):
-        """Probe one point SAMPLES times; the sweep reads the result."""
-        x, y = gcmd.get_float('X'), gcmd.get_float('Y')
-        count = gcmd.get_int('SAMPLES', self.precision_samples, minval=2)
+        """Probe the points _measure_precision staged; the sweep reads the
+        result. Takes NO probe parameters: the probe reads SAMPLES and the
+        like off this command, and the readings must be taken exactly the
+        way bed_mesh takes a node's."""
         self._precision = self._probe_points(
-            gcmd, [{'x': x, 'y': y}] * count, zero_ref=False)
+            gcmd, [{'x': x, 'y': y} for x, y in self._precision_plan],
+            zero_ref=False)
 
     def _measure_precision(self, params):
-        """(sigma, dof) of the probe, from repeated touches at the middle of
-        the mesh, right after the mesh it judges: same plate, same heat,
-        same probe settings."""
-        x = (params['min_x'] + params['max_x']) / 2.
-        y = (params['min_y'] + params['max_y']) / 2.
+        """(sigma, dof) of one mesh NODE reading, right after the mesh it
+        judges: same plate, same heat, same probe settings.
+
+        Each of precision_nodes() is read precision_samples times, visited
+        in turn rather than touched in place, so every reading is a fresh
+        approach like a mesh node's, and the spread is pooled over all nine.
+        This used to touch the middle of the bed alone and pass the probe
+        SAMPLES=<precision_samples>, which it took as touches per reading:
+        each reading was then the median of ten touches at the bed's
+        quietest spot, and sigma came out ~7x below a node's real noise."""
+        nodes = precision_nodes(params)
+        self._precision_plan = nodes * self.precision_samples
         self._precision = None
-        self.gcode.run_script('_THERMAL_MESH_PRECISION X=%.3f Y=%.3f '
-                              'SAMPLES=%d' % (x, y, self.precision_samples))
+        self.gcode.run_script('_THERMAL_MESH_PRECISION')
         self.gcode.run_script(self.after_sample.render())
-        if not self._precision:
+        if not self._precision or \
+                len(self._precision) != len(self._precision_plan):
             raise self.gcode.error("thermal mesh: precision probe returned "
                                    "nothing")
-        return sample_std(self._precision)
+        groups = [self._precision[i::len(nodes)] for i in range(len(nodes))]
+        return pooled_std(groups)
 
     def _sample_until_stable(self, data, job, reached):
         """Probe meshes until one verifies the one before it.
@@ -1084,9 +1222,17 @@ class FFThermalMesh:
             if previous is not None:
                 self.status['phase'] = 'verifying'
                 sigma, dof = self._measure_precision(data['mesh_params'])
+                # Every mesh here hangs off ONE reference touch, which moves
+                # all of its nodes alike: before_sample_gcode's G28 Z homes on
+                # the plate before each mesh, and a zero_reference_position,
+                # if set, re-zeroes it on one probed point instead. Either
+                # way the two meshes' averages differ by that touch's noise,
+                # not by sigma/sqrt(n) -- tested without it, the average
+                # failed on homing noise alone, mesh after mesh, however
+                # long the plate had settled.
                 check = verify_meshes(
                     previous[0], matrix, sigma, dof, job['confidence'],
-                    self._zero_ref()[0] != bed_mesh_module.ZrefMode.DISABLED)
+                    shared_reference=True)
                 check['sigma_ok'] = sigma <= job['max_sigma']
                 self.status.update(phase='sampling', last_delta=check['mean'],
                                    sigma=sigma)
@@ -1161,16 +1307,17 @@ class FFThermalMesh:
                     now = self.reactor.monotonic()
                     ch = self._chamber_temp(now)
                     if (chamber > 0. and ch is not None
-                            and ch > chamber + self.chamber_tolerance):
+                            and ch > chamber + self.tolerance):
                         # Down to a cooler set: the bed off so nothing
                         # holds the chamber up while it cools.
                         self.status['phase'] = 'cooling'
                         self._set_bed(0.)
-                        if not self._cool_chamber(chamber,
-                                                  job['cool_timeout']):
+                        if not self._cool_chamber(
+                                chamber + self.tolerance,
+                                job['cool_timeout']):
                             self._skip(data, chamber, None,
                                        "did not cool below %.1f in %ds"
-                                       % (chamber + self.chamber_tolerance,
+                                       % (chamber + self.tolerance,
                                           job['cool_timeout']))
                             skipped_chamber = chamber
                             current = chamber
@@ -1179,9 +1326,13 @@ class FFThermalMesh:
                     current = chamber
                 now = self.reactor.monotonic()
                 ch = self._chamber_temp(now)
-                if ch is not None and bed < ch:
+                # The bed cannot be held more than temp_tolerance below the
+                # air. A chamber a hair over the bed target still holds the
+                # bed within that, and _wait_for_temps accepts it.
+                if ch is not None and ch > bed + self.tolerance:
                     self._skip(data, chamber, bed,
-                               "below the chamber's %.1f" % (ch,))
+                               "more than %.1f below the chamber's %.1f"
+                               % (self.tolerance, ch))
                     continue
                 self._set_bed(bed)
                 self._wait_for_temps(bed, chamber)
@@ -1238,6 +1389,10 @@ class FFThermalMesh:
                     self._set_idle_timeout(idle_restore)
             except Exception:
                 logging.exception("thermal mesh sweep cleanup")
+            try:
+                self._wait_saved(yield_reactor=True)
+            except Exception:
+                logging.exception("thermal mesh sweep: final save")
             skipped = len(data.get('skipped', []))
             if skipped and not message:
                 message = "%d skipped (see 'skipped' in the map file)" % (
@@ -1297,6 +1452,7 @@ class FFThermalMesh:
                  'max_sigma': max_sigma}
         data = self._load() if resume else None
         if data is None:
+            self._wait_saved()        # nothing may land after the move
             if not resume and os.path.exists(self.data_file):
                 os.replace(self.data_file, self.data_file + '.bak')
                 gcmd.respond_info("thermal mesh: previous map kept as %s.bak"

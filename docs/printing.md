@@ -118,9 +118,13 @@ PURGE TOOL=1 PURGE_TEMP=220 LENGTH=50  ; app's clearNozzlePrint purge + cold wip
   and tears off instead of riding back to the dock. `WIPE=0` skips it.
   `LOAD_FILAMENT` has no wipe, as in the app (its guide tells you to pull
   the string off).
-* While a print is **paused** the macros only act on the mounted tool, use
-  the app's in-print lengths (100 mm then −5), and leave tool and heater for
+* While a print is **paused** the macros only act on the mounted tool — or
+  on the tool the print will resume with, if you have
+  [remapped](#remapping-tools) its tool number since — use the app's
+  in-print lengths (100 mm then −5), and leave tool and heater for
   `RESUME`. While **printing** they refuse.
+* `TOOL=` is always the physical tool: `TOOL=2` is the head in the third
+  dock, whatever `ASSIGN_TOOL` says.
 * The stock app has **no retract-unload** — its "unload" is the same forward
   push and the on-screen guide tells you to cut and pull. `UNLOAD_FILAMENT`
   is therefore designed, not ported; `unload_length` (80 mm) in
@@ -130,6 +134,41 @@ PURGE TOOL=1 PURGE_TEMP=220 LENGTH=50  ; app's clearNozzlePrint purge + cold wip
   are variables of `[gcode_macro _FF_FILAMENT]`.
 
 ---
+
+## Remapping tools
+
+A sliced file asks for tools by number: `T0`, `T1`, and `M104 … T1` to heat
+one. `ASSIGN_TOOL` decides which physical tool each number picks up, so you
+can print a file on different tools than it was sliced for, or carry on with
+another tool when one runs out — the same command, and the same rules, as
+klipper-toolchanger's:
+
+```
+ASSIGN_TOOL TOOL=T2 N=0     ; the file's T0 now uses the head in dock 3
+ASSIGN_TOOL RESET=1         ; every tool its own number again
+TOOLCHANGE_STATUS           ; shows the current map
+```
+
+* The tool you assign gives up its old number, and the tool that had the
+  number is left with none. After the example above, a file that also uses
+  `T2` is refused until you assign `T2` somewhere too.
+* HelixScreen's tool mapping (a slot's edit screen, the pre-print screen)
+  sends exactly these commands, so its screen and the printer agree.
+* **Before a print:** `START_PRINT` prepares, cleans and calibrates the tools
+  the file's numbers now select, with the temperatures the file gives those
+  numbers.
+* **While paused** (out of filament, say): remap, load or purge the new tool
+  if you want, then `RESUME`. Each tool is reheated to the temperature its
+  *number* had when the print paused, the tool now behind the paused number
+  is swapped onto the carriage, and the print carries on with it from where
+  it stopped, at that tool's own offsets.
+* **While printing:** the change takes effect at the file's next tool
+  change, and the new tool is heated only by the file's own `M104`/`M109`
+  for that number. Pausing first is safer.
+* The map is not saved: a restart puts every tool back on its own number.
+  Commands that name a tool directly — `SELECT_TOOL`, `UNSELECT_TOOL`,
+  `SET_TOOL_TEMPERATURE`, the filament and calibration commands — always
+  mean the physical tool.
 
 ## Runout and clogs
 

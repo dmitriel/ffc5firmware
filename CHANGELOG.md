@@ -8,6 +8,14 @@ both printer models or through every real-world workflow.
 
 ### Added
 
+- Tool remapping, before or during a print: `ASSIGN_TOOL TOOL=T2 N=0` makes
+  the file's `T0` -- its tool changes, its `M104`/`M109 T0` and
+  `START_PRINT`'s tool list -- use the head in dock 3, with
+  klipper-toolchanger's rules, so HelixScreen's tool mapping works. While
+  paused, `RESUME` heats each tool to the temperature of the number it now
+  has and swaps in the tool behind the paused number. Not yet tested on
+  hardware. See [Remapping tools](docs/printing.md#remapping-tools).
+
 - Flow mesh, a second bed-mesh strategy: the nozzle stays on the flat sliced
   plane and the first layers absorb the plate's unevenness in their
   thickness, with extrusion scaled to match. A layer is never laid thinner
@@ -116,6 +124,43 @@ both printer models or through every real-world workflow.
 
 ### Fixed
 
+- The thermal sweep no longer probes the same pair over and over without
+  ever verifying. Each mesh is homed on the plate first, and that homing
+  touch shifts the whole mesh by its own small error; the check that two
+  meshes match treated the shift as real movement unless a
+  `zero_reference_position` was set, so on a settled plate it kept
+  failing. It now always allows for that one touch.
+- The thermal sweep measured the probe's noise about seven times too low,
+  so even a settled bed could not verify. Each of its readings was secretly
+  the median of ten touches (the probe took its `SAMPLES=10` as touches per
+  reading), and all of them were at the middle of the bed, where the probe
+  scatters least. It now reads nine nodes spread over the mesh, the way the
+  mesh itself reads them, and pools their spread. `precision_samples` is
+  now readings per node, 4 by default.
+- A long thermal sweep could shut the printer down ("MCU shutdown: Timer
+  too close"). The map file, every mesh in it, is rewritten after each
+  pair, and late in a sweep that took the printer's CPU long enough to stop
+  Klipper keeping up with the board. It is now written in the background.
+- The thermal sweep no longer skips a pair whose bed target equals the
+  chamber's because the chamber read a tenth of a degree over it. A bed
+  target is skipped only when the chamber is more than `bed_tolerance`
+  (1 °C) above it, and a bed the warm chamber holds a little over its
+  target is accepted rather than waited on. The bed and the chamber now
+  share one tolerance, `temp_tolerance` (1 °C, replacing `bed_tolerance` and
+  `chamber_tolerance`), so the cool-down to a lower chamber set ends where
+  its bed = chamber pair can start, instead of 1 °C short of it.
+- The thermal sweep runs the chamber fan at full speed while it waits for
+  the chamber to cool to a lower set, and puts it back to its previous
+  speed afterwards (`cool_fan` / `cool_fan_speed` in `[ff_thermal_mesh]`).
+- `LOAD_FILAMENT`, `UNLOAD_FILAMENT` and `PURGE` with a tool mounted and the
+  motors off no longer run on an empty carriage. Homing docks the mounted
+  tool before it homes Z, but the macro had already decided the tool was on
+  the carriage and skipped picking it up again, so it travelled to the purge
+  chute and fed filament with no tool on. It now picks the tool back up after
+  homing.
+- HelixScreen no longer shows the wrong tool as active after you remap a
+  tool there. It kept its remap even though the printer refused it; the
+  printer now carries the remap out (see Added).
 - `RESUME` after a `PURGE`, `LOAD_FILAMENT` or `UNLOAD_FILAMENT` during a
   pause no longer drives the mounted tool into a docked one. Those macros
   leave the head at the purge chute or the wipe spot, beside the docks, and

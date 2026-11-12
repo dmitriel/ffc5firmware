@@ -372,7 +372,7 @@ def _idle_file():
     return {"ff_toolchange": {
         "calibrated_tools": [0, 1, 2, 3], "docked_tools": [0, 1, 2, 3],
         "current_tool": -1, "station_z": 1.0, "print_offset_ready": True,
-        "state_ok": True, "state_reason": ""},
+        "state_ok": True, "state_reason": "", "tool_map": [0, 1, 2, 3], "tool_numbers_by_tool": [0, 1, 2, 3]},
         "bed_mesh": {"profiles": {"MESH_DATA": {}}}}
 
 
@@ -394,7 +394,8 @@ def test_start_print_without_defer_still_meshes_and_grabs_the_first_tool(model):
 
     assert "BED_MESH_PROFILE LOAD=MESH_DATA" in out
     assert out.index("G28.1 Z") < out.index("BED_MESH_PROFILE LOAD=MESH_DATA")
-    assert out.index("BED_MESH_PROFILE LOAD=MESH_DATA") < out.index("T2")
+    assert out.index("BED_MESH_PROFILE LOAD=MESH_DATA") < \
+        out.index("SELECT_TOOL T=2")
     assert ("TOOLCHANGE_SET_PRINT_OFFSET NOZZLE=220.0 BED=60.0 LAYER=0.0 TOOL=2"
             in out)
 
@@ -499,7 +500,7 @@ def _first(out, prefix):
 def test_start_print_preheats_all_cleans_the_others_then_the_first_last(model):
     out, _ = _render_one(model, "START_PRINT", {
         "BED": "60", "TOOL": "2", "NOZZLE": "220", "LAYER": "0.2",
-        "TOOLS": "0:230,2:220,3:240", "PURGE": "30"})
+        "TOOLS": "0:230,2:220,3:240", "PURGE": "30"}, extra=_identity())
     preheat = _first(out, "_FF_NOZZLE_CLEAN MODE=preheat TOOLS=0,2,3")
     others = _first(out, "_FF_NOZZLE_CLEAN TOOLS=0,3 ")
     final = _first(out, "_FF_NOZZLE_CLEAN MODE=print TOOLS=2 ")
@@ -517,6 +518,11 @@ def test_start_print_preheats_all_cleans_the_others_then_the_first_last(model):
     assert not any(c == "T2" for c in out)          # the clean grabs it
 
 
+def _identity():
+    return {"ff_toolchange": {"tool_map": [0, 1, 2, 3],
+                              "tool_numbers_by_tool": [0, 1, 2, 3]}}
+
+
 def _clean_printer():
     return {"tool T%d" % t: {"extruder": "extruder%s" % (t or "")}
             for t in range(4)} | {"configfile": {"settings": {
@@ -529,7 +535,8 @@ def test_preheat_only_sets_each_tool_100_below_its_temperature(model):
     out, _ = _render_one(model, "_FF_NOZZLE_CLEAN", {
         "MODE": "preheat", "TOOLS": "0,2", "TEMPS": "230,0,250,0",
         "TEMP": "220"}, extra=_clean_printer())
-    assert out == ["M104 S130.0 T0", "M104 S150.0 T2"]
+    assert out == ["SET_TOOL_TEMPERATURE T=0 TARGET=130.0",
+                   "SET_TOOL_TEMPERATURE T=2 TARGET=150.0"]
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -562,7 +569,9 @@ def test_the_print_tool_preheats_100_below_its_print_temperature(model):
     out, _ = _render_one(model, "_FF_NOZZLE_CLEAN", {
         "MODE": "preheat", "TOOLS": "0,1", "TEMP": "240", "PRINT_TOOL": "1"},
         extra=_clean_printer())
-    assert out == ["M104 S120.0 T0", "M104 S140.0 T1"]  # PLA 220, NOZZLE 240
+    # PLA 220, NOZZLE 240
+    assert out == ["SET_TOOL_TEMPERATURE T=0 TARGET=120.0",
+                   "SET_TOOL_TEMPERATURE T=1 TARGET=140.0"]
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -725,7 +734,8 @@ def test_auto_falls_back_to_adaptive_only_when_thermal_is_not_accepted(
 def test_start_print_meshes_by_the_selector_or_its_own_mesh_param(
         model, params, mode):
     base = {"BED": "60", "TOOL": "0", "NOZZLE": "220", "LAYER": "0.2"}
-    out, info = _render_one(model, "START_PRINT", dict(base, **params))
+    out, info = _render_one(model, "START_PRINT", dict(base, **params),
+                            extra=_identity())
     assert out.count("_FF_MESH MODE=%s" % mode) == 1
     # Mesh before the last clean, while every tool is docked.
     assert _first(out, "_FF_MESH") < _first(out, "_FF_NOZZLE_CLEAN MODE=print")
@@ -856,8 +866,11 @@ def test_resume_from_the_park_over_the_print_does_not_move(model):
 def test_resume_travels_before_base_resume(model):
     out, _ = _render_one(model, "RESUME", {}, extra={
         "pause_resume": {"is_paused": True},
-        "ff_toolchange": {"current_tool": 1},
-        "gcode_macro PAUSE": {"t0": 0.0, "t1": 220.0, "t2": 0.0, "t3": 0.0}})
+        "ff_toolchange": {"current_tool": 1, "current_tool_number": 1,
+                          "tool_map": [0, 1, 2, 3],
+                          "tool_numbers_by_tool": [0, 1, 2, 3]},
+        "gcode_macro PAUSE": {"t0": 0.0, "t1": 220.0, "t2": 0.0, "t3": 0.0,
+                              "number": 1, "numbers": [0, 1, 2, 3]}})
     assert out.index("_FF_RESUME_TRAVEL") < out.index("BASE_RESUME")
 
 
@@ -867,9 +880,190 @@ def test_pause_records_where_the_print_stopped(model):
         "pause_resume": {"is_paused": False},
         "gcode_move": {"gcode_position": {"x": 130.0, "y": 120.0, "z": 42.0}},
         "toolhead": {"homed_axes": "xyz", "position": {"z": 45.2}},
+        "ff_toolchange": {"current_tool_number": 1,
+                          "tool_numbers_by_tool": [0, 1, 2, 3]},
         **{"extruder%s" % (t or ""): {"target": 0.0} for t in range(4)}})
     for line in ("VARIABLE=x VALUE=130.0", "VARIABLE=y VALUE=120.0",
                  "VARIABLE=z VALUE=42.0", "VARIABLE=saved VALUE=1"):
         assert "SET_GCODE_VARIABLE MACRO=PAUSE " + line in out
     assert out.index("SET_GCODE_VARIABLE MACRO=PAUSE VARIABLE=saved VALUE=1") \
         < out.index("BASE_PAUSE")
+
+
+def _filament_printer(current_tool, homed, paused=False, z=0.0):
+    """What a filament macro reads, with T`current_tool` on the carriage."""
+    return {
+        "print_stats": {"state": "paused" if paused else "standby"},
+        "pause_resume": {"is_paused": paused},
+        "ff_toolchange": {"current_tool": current_tool, "state_ok": True,
+                          "state_reason": "", "tool_map": [0, 1, 2, 3]},
+        "gcode_macro PAUSE": {"number": current_tool if paused else -1},
+        "toolhead": {"homed_axes": "xyz" if homed else "",
+                     "position": {"z": z}},
+        "fan_generic chamber_fan": {"speed": 0.0},
+        **{"tool T%d" % t: {"extruder": "extruder%s" % (t or "")}
+           for t in range(4)}}
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_filament_prep_decides_the_grab_only_after_homing(model):
+    # The bug: T1 mounted, motors off. PREP's G28 docks T1 before homing Z,
+    # but PREP was rendered before that and still read T1 as mounted, so it
+    # never re-grabbed it and loaded on an empty carriage. PREP must leave
+    # the mount decision to a macro rendered after its G28.
+    out, _ = _render_one(model, "_FF_FILAMENT_PREP", {"TOOL": 1, "TEMP": 250},
+                         extra=_filament_printer(1, homed=False))
+    assert "G28" in out
+    assert out.index("G28") < _first(out, "_FF_FILAMENT_MOUNT TOOL=1")
+    assert not any(c.startswith(("SELECT_TOOL", "ACTIVATE_EXTRUDER", "G1"))
+                   for c in out)
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_a_tool_docked_by_homing_is_grabbed_again(model):
+    # What the carriage looks like once the G28 wrapper has docked T1.
+    out, _ = _render_one(model, "_FF_FILAMENT_MOUNT", {"TOOL": 1, "TEMP": 250},
+                         extra=_filament_printer(-1, homed=True))
+    grab = out.index("SELECT_TOOL T=1")
+    assert grab < _first(out, "G1 X")
+    assert not any(c.startswith("ACTIVATE_EXTRUDER") for c in out)
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_the_mounted_tool_is_not_regrabbed(model):
+    out, _ = _render_one(model, "_FF_FILAMENT_MOUNT", {"TOOL": 1, "TEMP": 250},
+                         extra=_filament_printer(1, homed=True, z=20.0))
+    assert "ACTIVATE_EXTRUDER EXTRUDER=extruder1" in out
+    assert not any(c.startswith("SELECT_TOOL") for c in out)
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_unhomed_load_of_the_mounted_tool_regrabs_it_end_to_end(model):
+    # The whole chain at once, with the carriage state changing at the G28
+    # the way the G28 wrapper changes it on the printer.
+    state = _filament_printer(1, homed=False)
+    cp = _parse(model)
+    env = jinja2.Environment("{%", "%}", "{", "}")
+    printer = {}
+    for sec in cp.sections():
+        if sec.startswith("gcode_macro "):
+            printer[sec] = {}
+            for opt in cp.options(sec):
+                if opt.startswith("variable_"):
+                    try:
+                        printer[sec][opt[9:]] = ast.literal_eval(
+                            cp.get(sec, opt))
+                    except (ValueError, SyntaxError):
+                        printer[sec][opt[9:]] = cp.get(sec, opt)
+    printer.update(state)
+    out = []
+
+    def step(line):
+        cmd = line.split()[0].upper() if line.split() else ""
+        if not cmd:
+            return
+        if cmd == "G28":
+            out.append(line)
+            printer["ff_toolchange"] = dict(printer["ff_toolchange"],
+                                            current_tool=-1)
+            printer["toolhead"] = {"homed_axes": "xyz",
+                                   "position": {"z": 0.0}}
+            return
+        if cmd not in ("_FF_FILAMENT_PREP", "_FF_FILAMENT_MOUNT"):
+            out.append(line)
+            return
+        rendered = env.from_string(
+            cp.get("gcode_macro " + cmd, "gcode")).render(
+                params=_parse_params(line, cmd), printer=printer,
+                action_respond_info=lambda m: "",
+                action_raise_error=_raise)
+        for sub in _commands(rendered.splitlines()):
+            step(sub)
+
+    step("_FF_FILAMENT_PREP TOOL=1 TEMP=250")
+    assert out.index("G28") < out.index("SELECT_TOOL T=1") \
+        < _first(out, "G1 X")
+
+
+# --- tool numbers remapped by ASSIGN_TOOL -----------------------------------
+# T0 in the file selects the tool in dock 3 (physical T2); T2 selects none.
+_T0_ON_T2 = {"tool_map": [2, 1, -1, 3], "tool_numbers_by_tool": [-1, 1, 0, 3]}
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_start_print_runs_the_file_on_the_tools_its_numbers_select(model):
+    out, info = _render_one(model, "START_PRINT", {
+        "BED": "60", "TOOL": "0", "NOZZLE": "220", "LAYER": "0.2",
+        "TOOLS": "0:230,1:215"}, extra={"ff_toolchange": _T0_ON_T2})
+    assert "_FF_PREFLIGHT TOOL=2 TOOLS=2,1" in out
+    # Temperatures travel with their numbers: T0's 230 is now tool T2's.
+    assert _first(out, "_FF_NOZZLE_CLEAN MODE=preheat TOOLS=2,1 "
+                       "TEMPS=0,215.0,230.0,0 ") >= 0
+    assert _first(out, "_FF_NOZZLE_CLEAN TOOLS=1 ") >= 0
+    assert _first(out, "_FF_NOZZLE_CLEAN MODE=print TOOLS=2 ") >= 0
+    assert _first(out, "TOOLCHANGE_SET_PRINT_OFFSET") >= 0
+    assert "TOOL=2" in out[_first(out, "TOOLCHANGE_SET_PRINT_OFFSET")]
+    assert any("T0 -> T2" in m for m in info)
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_start_print_refuses_a_file_tool_that_selects_nothing(model):
+    with pytest.raises(AssertionError, match=r"tool\(s\) \[2\]"):
+        _render_one(model, "START_PRINT", {
+            "TOOL": "0", "TOOLS": "0,2"}, extra={"ff_toolchange": _T0_ON_T2})
+
+
+def _paused_on_t0(**toolchanger):
+    return {"pause_resume": {"is_paused": True},
+            "ff_toolchange": dict({"current_tool": 0}, **toolchanger),
+            "gcode_macro PAUSE": {"t0": 220.0, "t1": 0.0, "t2": 0.0,
+                                  "t3": 0.0, "number": 0,
+                                  "numbers": [0, 1, 2, 3]}}
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_resume_without_a_remap_reheats_and_keeps_the_tool(model):
+    out, _ = _render_one(model, "RESUME", {}, extra=_paused_on_t0(
+        tool_map=[0, 1, 2, 3], tool_numbers_by_tool=[0, 1, 2, 3]))
+    assert "SET_TOOL_TEMPERATURE T=0 TARGET=220.0" in out
+    assert "SET_TOOL_TEMPERATURE T=0 TARGET=220.0 WAIT=1" in out
+    assert not any(c.startswith(("T0", "T2", "SELECT_TOOL")) for c in out)
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_resume_after_a_remap_heats_and_swaps_in_the_new_tool(model):
+    out, info = _render_one(model, "RESUME", {},
+                            extra=_paused_on_t0(**_T0_ON_T2))
+    # The tool that took over number 0 takes over its temperature; the one
+    # that lost it stays off.
+    heat = out.index("SET_TOOL_TEMPERATURE T=2 TARGET=220.0")
+    swap = out.index("T0")
+    wait = out.index("SET_TOOL_TEMPERATURE T=2 TARGET=220.0 WAIT=1")
+    assert not any(c.startswith("SET_TOOL_TEMPERATURE T=0") for c in out)
+    assert heat < swap < wait < out.index("_FF_RESUME_TRAVEL") \
+        < out.index("BASE_RESUME")
+    assert any("T0 now selects tool T2" in m for m in info)
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_resume_refuses_when_the_paused_number_selects_nothing(model):
+    with pytest.raises(AssertionError, match="no longer selects a tool"):
+        _render_one(model, "RESUME", {}, extra=_paused_on_t0(
+            tool_map=[-1, 1, 0, 3], tool_numbers_by_tool=[-1, 1, 2, 3]))
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("tool, allowed", [(0, True), (2, True), (1, False)])
+def test_a_paused_filament_op_may_use_the_tool_the_print_resumes_with(
+        model, tool, allowed):
+    printer = _filament_printer(0, homed=True, paused=True)
+    printer["ff_toolchange"]["tool_map"] = [2, 1, -1, 3]
+    printer["gcode_macro PAUSE"] = {"number": 0}
+    if allowed:
+        out, _ = _render_one(model, "_FF_FILAMENT_PREP",
+                             {"TOOL": tool, "TEMP": 250}, extra=printer)
+        assert "_FF_FILAMENT_MOUNT TOOL=%d TEMP=250.0" % tool in out
+    else:
+        with pytest.raises(AssertionError, match="resumes with T2"):
+            _render_one(model, "_FF_FILAMENT_PREP",
+                        {"TOOL": tool, "TEMP": 250}, extra=printer)

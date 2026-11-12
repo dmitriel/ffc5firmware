@@ -51,25 +51,30 @@ chamber 40: bed 110 → … → 60
 * **The chamber is soaked once**, at the first pair (`CHAMBER_SOAK`). It is
   held at each lower target by its heater after that; set
   `CHAMBER_STEP_SOAK` to soak it again at every chamber step.
-* **Down to the next chamber target**, the bed is switched off and the sweep
-  waits for the chamber to fall to within `chamber_tolerance` of the new
-  target. If it has not within `COOL_TIMEOUT` — the enclosure holds heat
+* **Down to the next chamber target**, the bed is switched off, the chamber
+  fan (`cool_fan`) runs at full speed, and the sweep waits for the chamber
+  to fall to within `temp_tolerance` of the new target; the fan then goes
+  back to the speed it had. If it has not within `COOL_TIMEOUT` — the enclosure holds heat
   better than expected — that whole set is skipped and the sweep moves on to
   the next lower one.
 * **Within a set the bed goes from hottest to coolest.** The first step soaks
   for `MAX_SOAK` (the bed has just come back from off), every later one for
   `SOAK`.
 * **The bed is never below the chamber.** Bed targets below the chamber
-  target are left out of the plan; at each pair, a bed target below the
-  chamber's measured temperature is skipped too. A bed cannot be held below
-  the air around it.
+  target are left out of the plan; at each pair, a bed target more than
+  `temp_tolerance` (1 °C) below the chamber's measured temperature is skipped
+  too. A bed cannot be held below the air around it, but a chamber a little
+  over the bed target — a hot bed easily carries it a few tenths past its
+  own — only holds the bed a little warm: that pair runs, the bed is
+  accepted up to the chamber's temperature plus `temp_tolerance`, and the
+  map records the temperatures actually measured.
 
 Skipped sets and pairs are listed under `"skipped"` in the map file and by
 `THERMAL_MESH_STATUS`. The map that results is triangular rather than a full
 grid; the analysis below does not need a full grid.
 
-At every pair it waits for the bed (±`bed_tolerance`) and the chamber (at
-least target − `chamber_tolerance`; a hot bed may carry the chamber past its
+At every pair it waits for the bed (±`temp_tolerance`) and the chamber (at
+least target − `temp_tolerance`; a hot bed may carry the chamber past its
 target, which is recorded rather than waited out), soaks, then probes full
 meshes until one verifies the one before it (next section), however many
 that takes; `THERMAL_MESH_ABORT` stops it. It stores the average of the
@@ -92,10 +97,16 @@ start of that same mesh and at the end of the verification. If a heater does not
 ### Verifying a mesh
 
 Every mesh after the first at a pair is a **verification** of the one before.
-Straight after it, the probe touches the middle of the mesh
-`precision_samples` times (10) and the standard deviation of those touches is
-the probe's precision σ, measured at that moment, on that plate, at that
-heat. If the plate has stopped moving, the difference between the two meshes
+Straight after it, the probe reads nine mesh nodes — the corners, the
+middles of the edges and the middle — `precision_samples` times each (4),
+going round them in turn so that every reading is a fresh approach, exactly
+as a mesh node is read (same probe settings, same number of touches per
+reading). The spread of each node's readings about its own mean, pooled over
+the nine, is the probe's precision σ, measured at that moment, on that
+plate, at that heat. It is measured across the bed because the probe is not
+equally repeatable everywhere: on the Creator 5 a touch at the edges
+scatters about three times as much as one in the middle. If the plate has
+stopped moving, the difference between the two meshes
 at each node is just two probe readings apart: mean 0, variance 2σ². Two
 tests check that, on the n node differences d:
 
@@ -106,14 +117,22 @@ tests check that, on the n node differences d:
 
 dof is the precision touches less one; F rather than normal limits account
 for σ itself being measured. The two tests use independent parts of the
-differences: the average, and what is left once it is taken out. With a
-`zero_reference_position` in `[bed_mesh]`, one reference touch shifts a whole
-mesh, and the first test widens its limit to match. Each test runs at half the remaining risk
-(97.5 % for `CONFIDENCE=0.95`), so the two together hold at 95 %: the meshes
-are accepted only when nothing in them tells them apart from the same plate
-probed twice. The first test catches the whole plate still rising or falling
-by a fraction of σ — 25 nodes average it out of the noise — and the second a
-single region that is still moving while the average stays put.
+differences: the average, and what is left once it is taken out.
+
+Every mesh hangs off one reference touch: the `G28 Z` that
+`before_sample_gcode` runs on the plate before it, or the
+`zero_reference_position` touch if `[bed_mesh]` has one. That touch's error
+moves every node of the mesh alike, so the first test allows for it: the
+average of two meshes may differ by about one touch's noise, not by σ/√n.
+The plate rising or falling as a whole is homed away by that same touch, so
+it is not something these meshes can show. What the tests catch is the
+plate still changing **shape**: the second test flags any part of it that
+moves beyond the probe's noise, and the first an average shift larger than
+the reference touch accounts for.
+
+Each test runs at half the remaining risk (97.5 % for `CONFIDENCE=0.95`),
+so the two together hold at 95 %: the meshes are accepted only when nothing
+in them tells them apart from the same plate probed twice.
 
 A noisy enough probe makes any two meshes look alike, so a verification also
 needs σ at or below `MAX_SIGMA`. The console line for each verification gives
@@ -296,12 +315,13 @@ section with just that option at the end of `printer.cfg`.
 | `bed_heater` | `heater_bed` | |
 | `chamber_heater` | `chamber_heater` | Set through `SET_HEATER_TEMPERATURE`, so the chamber fan coupling applies. |
 | `chamber_sensor` | (heater, then `temperature_sensor chamber`) | Object to read the chamber temperature from. |
-| `bed_tolerance` | 1.0 | °C either side of the bed target. |
-| `chamber_tolerance` | 2.0 | °C below the chamber target. |
+| `temp_tolerance` | 1.0 | °C, for both heaters: the bed either side of its target, the chamber below its target, and how close a cool-down to a lower chamber set has to get. One number, so a cool-down always ends where the set's bed = chamber pair can start. (`bed_tolerance` and `chamber_tolerance` are still accepted; the bed's stands in when `temp_tolerance` is unset.) |
 | `heat_timeout` | 5400 | Seconds to reach a pair's targets before the sweep stops. |
 | `cool_timeout` | 3600 | Seconds the chamber has to cool to a lower target before that set is skipped (`COOL_TIMEOUT`). |
+| `cool_fan` | `chamber_fan` | `[fan_generic]` run while the sweep waits for the chamber to cool, then put back to its previous speed. Empty: no fan. |
+| `cool_fan_speed` | 1.0 | Its speed for those waits. |
 | `max_samples` | 0 | Full meshes per pair at most; 0 keeps going until two verify. |
-| `precision_samples` | 10 | Touches at the middle of the mesh after each verification mesh, to measure σ. |
+| `precision_samples` | 4 | Readings of each of the nine precision nodes after each verification mesh, to measure σ. |
 | `confidence` | 0.95 | `CONFIDENCE`'s default. |
 | `max_probe_sigma` | 0.01 | `MAX_SIGMA`'s default, mm. |
 | `min_point_spacing` | 60 | mm between chosen points. |

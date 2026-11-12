@@ -59,6 +59,17 @@ ERR_RELEASE_STATE = 144         # E0144    state error after release verify
 # this module and the [ff_tool n] sections, with the commands such UIs send
 # (SELECT_TOOL, UNSELECT_TOOL, INITIALIZE_TOOLCHANGER, ASSIGN_TOOL).
 #
+# TOOL NUMBERS. A print file and its slicer speak in tool NUMBERS: bare T<n>,
+# M104/M109 T<n>, START_PRINT TOOL=/TOOLS=. ASSIGN_TOOL TOOL=T<p> N=<n> points
+# number n at physical tool p, klipper-toolchanger's semantics: p gives up its
+# old number, and the tool that had n is left with none (HelixScreen keeps the
+# same table). Identity at every start; nothing is saved. Everything else --
+# SELECT_TOOL, UNSELECT_TOOL, SET_TOOL_TEMPERATURE, the [ff_tool n] sections,
+# current_tool, the filament and calibration macros -- names the PHYSICAL tool.
+# SELECT_TOOL T=<n> stays physical on purpose, unlike upstream's: it is what
+# HelixScreen 0.99.118 sends to mount a slot, and newer HelixScreen sends
+# TOOL="tool T<p>", which is physical upstream too.
+#
 # HelixScreen subscribes (src/api/moonraker_discovery_sequence.cpp):
 #   toolchanger : status (ready|changing|error|uninitialized), tool_number,
 #                 tool_numbers[, tool_names, tool]
@@ -82,15 +93,21 @@ class _ToolchangerView:
         # reports. We keep no commanded state -- every answer is derived from
         # the dock and grab sensors -- so the two are the same by
         # construction, and both are reported for UIs that read only one.
+        # tool_number is the mounted tool's ASSIGNED number, -1 when it has
+        # none (upstream would report the number it last had). The listing
+        # is ordered by number, as upstream's is.
         name = 'T%d' % mounted if mounted >= 0 else None
+        number = own['current_tool_number']
+        assigned = sorted((n, i) for i, n in
+                          enumerate(own['tool_numbers_by_tool']) if n >= 0)
         return {'name': 'toolchanger',
                 'status': status,
-                'tool_number': mounted,
-                'tool_numbers': list(range(EXTRUDER_COUNT)),
-                'tool_names': ['T%d' % i for i in range(EXTRUDER_COUNT)],
+                'tool_number': number,
+                'tool_numbers': [n for n, _i in assigned],
+                'tool_names': ['T%d' % i for _n, i in assigned],
                 'tool': name,
                 'detected_tool': name,
-                'detected_tool_number': mounted,
+                'detected_tool_number': number,
                 'has_detection': True,
                 'state_reason': own['state_reason'],
                 # The print-scoped Z the tool frame is carrying on top of
@@ -120,7 +137,7 @@ class _ToolView:
                       else 'absent')
         except (FFToolchangeError, IndexError):
             detect = 'unavailable'
-        return {'tool_number': self.index,
+        return {'tool_number': toolchanger.tool_numbers[self.index],
                 'name': 'T%d' % self.index,
                 'toolchanger': 'toolchanger',
                 'active': mounted == self.index,
@@ -258,6 +275,9 @@ class FFToolchange:
         # True while a tool select/change/park sequence is running (reported as
         # toolchanger.status = 'changing').
         self.changing = False
+        # Physical tool -> the tool number it answers to (-1: none).
+        # ASSIGN_TOOL rewrites it; identity at every start.
+        self.tool_numbers = list(range(EXTRUDER_COUNT))
         # Reported as every tool's `fan`: the part-cooling fan is shared on
         # this machine (fanM106 via M106 P1); heat_fan / heat_fan1..3 are the
         # hotend fans.
@@ -527,6 +547,8 @@ class FFToolchange:
             if command.upper() not in macros:
                 missing.append("gcode_macro %s" % command)
 
+        self._wrap_heater_commands()
+
         self.runout_switch = self._resolve_runout_sensors(
             'filament_switch_sensor', self.runout_switch_prefix, missing)
         self.runout_motion = self._resolve_runout_sensors(
@@ -608,9 +630,95 @@ class FFToolchange:
                 " FF_IMPORT_FIRMWARE_CONFIG once)"
                 " and SAVE_CONFIG." % ", ".join("T%d" % i for i in missing))
 
-    def _make_tn(self, index):
+    def _make_tn(self, number):
         def handler(gcmd):
-            self._toolchange(gcmd, index)
+            self._toolchange(gcmd, self._tool_for_number(number, gcmd))
+        return handler
+
+    # ---------------- tool numbers ----------------
+
+    def _tool_for_number(self, number, gcmd=None):
+        """The physical tool that tool number `number` selects. With gcmd,
+        an unassigned number is that command's error; without, None."""
+        for tool, assigned in enumerate(self.tool_numbers):
+            if assigned == number:
+                return tool
+        if gcmd is None:
+            return None
+        raise gcmd.error("T%d is not assigned to a tool (ASSIGN_TOOL TOOL=T<n>"
+                         " N=%d gives it one)" % (number, number))
+
+    def _number_map(self):
+        """Tool number -> physical tool, -1 where a number has none."""
+        out = [-1] * EXTRUDER_COUNT
+        for tool, number in enumerate(self.tool_numbers):
+            if 0 <= number < EXTRUDER_COUNT:
+                out[number] = tool
+        return out
+
+    def assign_tool_number(self, tool, number):
+        """klipper-toolchanger's ASSIGN_TOOL: `tool` answers to `number` from
+        now on. Its old number is left with no tool, and the tool that had
+        `number` is left with no number."""
+        for other, assigned in enumerate(self.tool_numbers):
+            if assigned == number and other != tool:
+                self.tool_numbers[other] = -1
+        self.tool_numbers[tool] = number
+
+    def reset_tool_numbers(self):
+        self.tool_numbers = list(range(EXTRUDER_COUNT))
+
+    def _describe_tool_numbers(self):
+        if self.tool_numbers == list(range(EXTRUDER_COUNT)):
+            return "identity"
+        return ", ".join("T%d -> %s" % (n, "T%d" % p if p >= 0 else "none")
+                         for n, p in enumerate(self._number_map()))
+
+    @staticmethod
+    def _extruder_index(extruder_name):
+        """Klipper's M104 T<i> means [extruder] for 0, [extruder<i>] else."""
+        if extruder_name == 'extruder':
+            return 0
+        suffix = extruder_name[len('extruder'):]
+        if extruder_name.startswith('extruder') and suffix.isdigit():
+            return int(suffix)
+        return None
+
+    def _wrap_heater_commands(self):
+        """M104/M109 T<n> come from the print file, so T is a tool NUMBER:
+        point it at the extruder of the tool the number selects, then hand
+        over to whatever handled the command before (Klipper's, or a macro
+        that renamed it) -- the same rename dance as ff_print's. Our own
+        macros heat a physical tool with SET_TOOL_TEMPERATURE instead."""
+        for cmd in ('M104', 'M109'):
+            previous = self.gcode.register_command(cmd, None)
+            if previous is None:
+                continue
+            self.gcode.register_command(
+                cmd, self._make_heater_handler(cmd, previous),
+                desc="%s; T<n> is a tool number (ASSIGN_TOOL)" % (cmd,))
+
+    def _make_heater_handler(self, cmd, previous):
+        def handler(gcmd):
+            params = gcmd.get_command_parameters()
+            if 'T' in params:
+                number = gcmd.get_int('T', minval=0)
+                tool = self._tool_for_number(number)
+                if tool is None:
+                    # Skipped rather than refused: an unassigned number's
+                    # preheat is not worth ending a print over. Its T<n>
+                    # is, and says so.
+                    gcmd.respond_info("%s: T%d is not assigned to a tool;"
+                                      " ignored" % (cmd, number))
+                    return
+                index = self._extruder_index(self._extruder_name(tool))
+                if index is None:
+                    raise gcmd.error("%s: T%d selects T%d, whose extruder %s"
+                                     " has no M104 index"
+                                     % (cmd, number, tool,
+                                        self._extruder_name(tool)))
+                params['T'] = str(index)
+            previous(gcmd)
         return handler
 
     def _run(self, script):
@@ -1162,7 +1270,12 @@ class FFToolchange:
     cmd_TOOLCHANGE_help = "Change to tool INDEX=0..3"
 
     def cmd_TOOLCHANGE(self, gcmd):
-        self._toolchange(gcmd, gcmd.get_int('INDEX'))
+        # INDEX is a tool number, like the bare T<n> it stands in for.
+        number = gcmd.get_int('INDEX')
+        if number < 0 or number >= EXTRUDER_COUNT:
+            raise gcmd.error("TOOLCHANGE: INDEX must be 0..%d, got %d"
+                             % (EXTRUDER_COUNT - 1, number))
+        self._toolchange(gcmd, self._tool_for_number(number, gcmd))
 
     def _toolchange(self, gcmd, tool):
         if tool < 0 or tool >= EXTRUDER_COUNT:
@@ -1438,12 +1551,17 @@ class FFToolchange:
     # ---------------- klipper-toolchanger command aliases ----------------
 
     def _tool_arg(self, gcmd, required=True):
-        """klipper-toolchanger accepts T=<number> or TOOL=<name>."""
+        """The PHYSICAL tool named by T=<n> or TOOL=T<n> / TOOL="tool T<n>".
+
+        Not remapped by ASSIGN_TOOL -- see the TOOL NUMBERS note at the top."""
         tool = gcmd.get_int('T', None)
         if tool is None:
             name = gcmd.get('TOOL', None)
             if name is not None:
                 name = name.strip()
+                # HelixScreen after 0.99.118 names the object: "tool T2".
+                if name.lower().startswith('tool '):
+                    name = name[5:].strip()
                 if name.upper().startswith('T') and name[1:].isdigit():
                     tool = int(name[1:])
                 else:
@@ -1457,8 +1575,8 @@ class FFToolchange:
             raise gcmd.error("T must be 0..%d" % (EXTRUDER_COUNT - 1))
         return tool
 
-    cmd_SELECT_TOOL_help = ("Select a tool (T=<n> | TOOL=T<n>); same as"
-                            " T<n>. RESTORE_AXIS=<xyz> returns the toolhead")
+    cmd_SELECT_TOOL_help = ("Select a physical tool (T=<n> | TOOL=T<n>);"
+                            " RESTORE_AXIS=<xyz> returns the toolhead")
 
     def cmd_SELECT_TOOL(self, gcmd):
         self._toolchange(gcmd, self._tool_arg(gcmd))
@@ -1500,13 +1618,31 @@ class FFToolchange:
                           % (mounted, reason, frame,
                              "" if before == after else " -- re-applied"))
 
-    cmd_ASSIGN_TOOL_help = "Not supported on this toolchanger"
+    cmd_ASSIGN_TOOL_help = ("Point tool number N at physical tool TOOL=T<n>"
+                            " (RESET=1: every tool its own number again)")
 
     def cmd_ASSIGN_TOOL(self, gcmd):
-        raise gcmd.error(
-            "ASSIGN_TOOL: logical-to-physical tool remapping is not supported"
-            " here; remap in the slicer (the fork's"
-            " SDCARD_SET_GCODE_EX_USED_BASE table is the future home)")
+        """klipper-toolchanger's ASSIGN_TOOL TOOL=<tool> N=<number>.
+
+        From then on tool number N in a file -- its T<N>, M104/M109 T<N>,
+        START_PRINT's tool list -- selects TOOL. TOOL's old number is left
+        with no tool and the tool that had N with no number, as upstream and
+        HelixScreen both have it. Mid-print it takes effect at the file's
+        next T<n>; while paused, RESUME also swaps to the tool now behind
+        the number the print was on (ff-print-macros.cfg). Not saved: every
+        restart is identity again."""
+        if gcmd.get_int('RESET', 0):
+            self.reset_tool_numbers()
+            gcmd.respond_info("ASSIGN_TOOL: every tool answers to its own"
+                              " number")
+            return
+        if self.changing:
+            raise gcmd.error("ASSIGN_TOOL: refused during a tool change")
+        tool = self._tool_arg(gcmd)
+        number = gcmd.get_int('N', minval=0, maxval=EXTRUDER_COUNT - 1)
+        self.assign_tool_number(tool, number)
+        gcmd.respond_info("ASSIGN_TOOL: T%d now selects tool T%d (%s)"
+                          % (number, tool, self._describe_tool_numbers()))
 
     cmd_SET_TOOL_TEMPERATURE_help = (
         "Set a tool's hotend target (T=<n> | TOOL=T<n>, default the mounted"
@@ -1604,6 +1740,8 @@ class FFToolchange:
         else:
             lines = ["current_tool=%d  (%s)" % (tool, reason)]
         lines.append("  (derived from the dock sensors; nothing is stored)")
+        lines.append("  tool numbers (ASSIGN_TOOL): %s"
+                     % self._describe_tool_numbers())
         applied = self.gcode_transform.tool
         if applied is None:
             lines.append("  frame applied: NONE -- raw machine coordinates."
@@ -1725,7 +1863,14 @@ class FFToolchange:
 
     def get_status(self, eventtime):
         tool, reason = self._current_tool_or_none(eventtime)
-        return {'current_tool': -1 if tool is None else tool,
+        mounted = -1 if tool is None else tool
+        return {'current_tool': mounted,
+                # ASSIGN_TOOL's table, both ways: physical tool -> its
+                # number, tool number -> its physical tool (-1 = none).
+                'current_tool_number': (self.tool_numbers[mounted]
+                                        if mounted >= 0 else -1),
+                'tool_numbers_by_tool': list(self.tool_numbers),
+                'tool_map': self._number_map(),
                 'state_ok': tool is not None,
                 'state_reason': reason,
                 'calibrated_tools': [tool_object.index
