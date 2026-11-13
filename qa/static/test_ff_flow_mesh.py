@@ -51,6 +51,26 @@ def test_a_low_spot_holds_the_maximum_and_carries_the_rest(fm):
     assert r2 == pytest.approx(0.)
 
 
+def test_max_flow_spreads_a_deep_low_spot_over_more_layers(fm):
+    heights = [0.2, 0.1, 0.1, 0.1, 0.1]
+    # Unlimited, layer 2 would be 0.2 thick: twice its own height.
+    _, t2 = fm.layer_surface(-0.3, heights[:2], 0.1, 0.4)
+    assert t2 == pytest.approx(0.2)
+    # At 1.5x: layer 1 0.3 (-0.2 left), then 0.15 a layer, each taking
+    # 0.05 off what is left, flat after layer 5.
+    expected = [0.3, 0.15, 0.15, 0.15, 0.15]
+    for n, t in enumerate(expected, 1):
+        r, got = fm.layer_surface(-0.3, heights[:n], 0.1, 0.4, 1.5)
+        assert got == pytest.approx(t)
+    assert r == pytest.approx(0.)
+
+
+def test_max_flow_never_forces_a_layer_below_its_own_height(fm):
+    # 1.5 x 0.2 = 0.3 is above h, the nozzle limit 0.4 is not the cap.
+    assert fm.layer_surface(0., [0.2], 0.1, 0.4, 1.5) == (0., 0.2)
+    assert fm.layer_surface(0., [0.5], 0.1, 0.4, 1.5) == (0., 0.5)
+
+
 def test_a_layer_thinner_than_the_minimum_keeps_its_own_height(fm):
     assert fm.layer_surface(0., [0.08], 0.1, 0.4) == (0., 0.08)
 
@@ -85,9 +105,11 @@ class Next:
     def __init__(self):
         self.pos = [0., 0., 10., 0.]
         self.moves = []
+        self.speeds = []
 
     def move(self, newpos, speed):
         self.moves.append(list(newpos))
+        self.speeds.append(speed)
         self.pos = list(newpos)
 
     def get_position(self):
@@ -156,11 +178,16 @@ class Config:
         return self.values.get(option, default)
 
 
-def started(fm, mesh_z, **kw):
+def started(fm, mesh_z, mean=0., max_flow=None, **kw):
+    """Started on mesh_z. The transform tests check the arithmetic against
+    the plain mesh, so the reference plane is pinned to `mean` (0) unless
+    mean=None lets it be the mesh's own; max_flow None means unlimited."""
     printer = Printer(mesh_z, **kw)
     obj = fm.FFFlowMesh(Config(printer, min_thickness=0.1,
-                               split_distance=2.))
-    obj.start(0.1, None, 0.2)
+                               split_distance=2., max_flow=1.5))
+    if mean is not None:
+        obj._mean = lambda mesh: mean
+    obj.start(0.1, None, 0.2, max_flow or 100.)
     return obj, printer
 
 
@@ -304,3 +331,55 @@ def test_starting_without_a_first_layer_is_refused(fm):
     obj = fm.FFFlowMesh(Config(printer))
     with pytest.raises(RuntimeError, match="first layer height"):
         obj.start(0.1, None, 0.)
+
+
+# -- the reference plane and the volumetric rate ---------------------------
+
+def test_the_nozzle_follows_the_mesh_mean_and_absorbs_only_the_rest(fm):
+    # The test mesh samples x = 0..200: mean (0 + 50 + ... + 200)/5 * k.
+    obj, printer = started(fm, lambda x, y: -0.001 * x, mean=None)
+    assert obj.reference == pytest.approx(-0.1)
+    line(obj, 0., 10., 0.2, 0., 1.)
+    # At x = 10 the plate is 0.01 low, 0.09 above the mean: layer 1 is
+    # 0.2 - 0.09 = 0.11 thick there, the nozzle at Z 0.2 - 0.1.
+    last = printer.next.moves[-1]
+    assert last[2] + (-0.01) == pytest.approx(0.1)
+    seg_e = last[3] - printer.next.moves[-2][3]
+    assert seg_e == pytest.approx(0.2 * 0.11 / 0.2)
+
+
+def test_a_uniformly_offset_plate_prints_plain_layers(fm):
+    obj, printer = started(fm, lambda x, y: -0.25, mean=None)
+    assert obj.flat_layer == 1
+    line(obj, 0., 10., 0.2, 0., 1.)
+    last = printer.next.moves[-1]
+    assert last[2] - 0.25 == pytest.approx(-0.05)    # standard mesh
+    assert last[3] == pytest.approx(1.)              # unscaled E
+    assert printer.next.speeds[-1] == pytest.approx(100.)
+
+
+def test_speed_is_scaled_to_hold_the_volumetric_rate(fm):
+    obj, printer = started(fm, lambda x, y: 0.05)    # layer 1 at 0.75x
+    line(obj, 0., 10., 0.2, 0., 1.)
+    assert printer.next.speeds[-5:] == pytest.approx([100. / 0.75] * 5)
+    obj2, printer2 = started(fm, lambda x, y: -0.1)  # layer 1 at 1.5x
+    line(obj2, 0., 10., 0.2, 0., 1.)
+    assert printer2.next.speeds[-5:] == pytest.approx([100. / 1.5] * 5)
+
+
+def test_travel_and_retracts_keep_their_speed(fm):
+    obj, printer = started(fm, lambda x, y: 0.05)
+    obj.move([0., 10., 0.2, 0.], 300.)               # travel
+    assert printer.next.speeds[-1] == 300.
+    line(obj, 0., 10., 0.2, 0., 1.)
+    obj.move([10., 10., 0.2, 0.2], 40.)              # retract in place
+    assert printer.next.speeds[-1] == 40.
+
+
+def test_the_configured_max_flow_is_the_default(fm):
+    printer = Printer(lambda x, y: -0.001 * x)
+    obj = fm.FFFlowMesh(Config(printer, min_thickness=0.1,
+                               split_distance=2., max_flow=1.5))
+    obj.start(0.1, None, 0.2)
+    assert obj.run_flow == 1.5
+    assert obj.get_status(0.)["max_flow"] == 1.5

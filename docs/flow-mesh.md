@@ -1,7 +1,7 @@
 # Flow mesh
 
 A second way to use the bed mesh. It is off unless you turn it on, and it is
-new: it has not been tried on hardware yet.
+new: it has had only one hardware print so far.
 
 **Standard bed mesh** moves the nozzle up and down with the plate. Every
 layer is the same thickness, so the plate's shape is copied into the bottom
@@ -32,15 +32,21 @@ this at the end of `printer.cfg`:
 variable_enabled: 1
 ``` You can also start
 it yourself after the mesh is loaded:
-`FLOW_MESH_START FIRST_LAYER=0.2 [MIN_THICKNESS=0.1] [MAX_THICKNESS=0.4]`.
+`FLOW_MESH_START FIRST_LAYER=0.2 [MIN_THICKNESS=0.1] [MAX_THICKNESS=0.4] [MAX_FLOW=1.5]`.
 
 ---
 
 ## How each layer is printed
 
+Only the plate's unevenness is absorbed. If the whole mesh sits lower or
+higher than zero (a fresh adaptive mesh often sits around 0.1 mm off), the
+nozzle follows that average height, just as it does with the standard mesh.
+Filling that difference with plastic would make every point thicker and no
+layer flatter.
+
 At every point on the plate the firmware keeps track of how far the surface
 printed so far sits above or below the flat plane. Before the first layer
-that is the bed mesh itself.
+that is the bed mesh less its average.
 
 For a layer of height *h* the gap at a point is *h* minus that surface. The
 layer fills the gap, within limits:
@@ -49,7 +55,13 @@ layer fills the gap, within limits:
 |---|---|---|---|
 | gap between the limits | the gap | on the flat plane | × gap ÷ *h* |
 | gap under `min_thickness` (a high spot) | `min_thickness` | raised just enough | × `min_thickness` ÷ *h* |
-| gap over `max_thickness` (a low spot) | `max_thickness` | lowered just enough | × `max_thickness` ÷ *h* |
+| gap over the upper limit (a low spot) | the upper limit | lowered just enough | × upper limit ÷ *h* |
+
+The upper limit is `max_thickness` or `max_flow` × *h* (1.5 × *h* by
+default), whichever is smaller. The flow cap matters on the thin layers above
+the first. Without it, a 0.12 mm second layer over a deep low spot could be
+asked for 0.3 mm of plastic. That is more than the bead can build up and
+more than the hotend can melt at that layer's speed.
 
 Where a limit was hit, what was left over is carried into the next layer,
 which flattens what it can of it in turn. Once nothing is left anywhere on
@@ -62,8 +74,11 @@ Example, 0.2 mm layers, 0.1–0.4 mm limits:
   flat;
 * a spot 0.15 mm high: layer 1 is 0.1 mm (the minimum; the nozzle rises
   0.05 mm), layer 2 is 0.15 mm, flat after layer 2;
-* a spot 0.3 mm low: layer 1 is 0.4 mm (the maximum), layer 2 0.3 mm, flat
-  after layer 2.
+* a spot 0.3 mm low: layer 1 is 0.3 mm (1.5 × 0.2, at 150 %), layer 2
+  0.3 mm, flat after layer 2. At 0.1 mm layers above the first, layer 2 and
+  each layer after it would be 0.15 mm, flat after layer 5.
+
+(The spot heights are measured from the mesh's average.)
 
 A layer thinner than `min_thickness` (or thicker than `max_thickness`) is
 never forced to the limit on a flat spot; it keeps its own height there.
@@ -74,7 +89,12 @@ never forced to the limit on a flat spot; it keeps its own height there.
 
 * **The first layer's line width does not change; its height does.** Over a
   high spot the layer is thinner and carries less plastic, over a low spot
-  more. If your first layer is already close to the minimum, raise the
+  more.
+* **The speed changes with the flow, so the melt rate does not.** At 150 %
+  flow a line is printed at two thirds of its speed, at 50 % at twice its
+  speed. The printer's speed and acceleration limits still apply. Over a
+  high spot the first layer may therefore print noticeably faster than the
+  slicer's first-layer speed. If your first layer is already close to the minimum, raise the
   slicer's first-layer height rather than lowering `min_thickness`.
 * **The first layer's height comes from the print start**, the `LAYER=`
   that `START_PRINT` already takes (filled in from the
@@ -106,7 +126,9 @@ section with just that option at the end of `printer.cfg`.
 |---|---|---|
 | `min_thickness` | 0.1 | Thinnest a layer may be laid over a high spot. |
 | `max_thickness` | the mounted nozzle's diameter | Thickest a layer may be laid over a low spot. |
+| `max_flow` | 1.5 | Most a layer may be extruded, as a multiple of its normal flow (at least 1). |
 | `split_distance` | 2.0 | mm. Moves are split this finely so the nozzle height and flow follow the mesh along them. |
 
 `printer.ff_flow_mesh` reports `active`, `layer`, `layer_z`, `mesh_left`
-(the largest remaining deviation, mm) and `flat_layer`.
+(the largest remaining deviation, mm), `flat_layer`, `reference` (the mesh
+average the nozzle follows, mm) and `max_flow`.

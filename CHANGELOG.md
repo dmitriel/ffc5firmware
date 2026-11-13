@@ -21,8 +21,13 @@ both printer models or through every real-world workflow.
   thickness, with extrusion scaled to match. A layer is never laid thinner
   than 0.1 mm or thicker than the nozzle diameter; past those the nozzle
   follows the mesh just far enough, and the remainder goes into the next
-  layer, until the effective mesh is flat. `FLOW_MESH_TOGGLE ENABLE=1` uses it
-  for the next print. Off by default and not yet tested on hardware. See
+  layer, until the effective mesh is flat. The nozzle follows the mesh's
+  average height, and only the unevenness around it is absorbed. No layer is
+  extruded at more than 1.5× its flow (`max_flow`), and the speed is scaled
+  against the flow so the volumetric rate stays as sliced. `FLOW_MESH_TOGGLE
+  ENABLE=1` uses it for the next print. Off by default. The first hardware
+  print showed the second layer too far above the first over a deep low spot,
+  which the average reference and the flow cap address. See
   [the flow mesh page](docs/flow-mesh.md).
 - One bed-mesh selector, `BED_MESH_MODE MODE=auto|off|fixed|adaptive|thermal`,
   for the mesh `START_PRINT` uses: none, the saved `MESH_DATA`, a fresh mesh
