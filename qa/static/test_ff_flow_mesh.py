@@ -24,55 +24,60 @@ def fm():
 # -- the arithmetic -------------------------------------------------------
 
 def test_a_flat_bed_prints_plain_layers(fm):
-    r, t = fm.layer_surface(0., [0.2, 0.2], 0.1, 0.4)
+    r, t = fm.layer_surface(0., [0.2, 0.2], 0.5, 0.4)
     assert (r, t) == (0., 0.2)
 
 
 def test_a_small_bump_is_absorbed_by_the_first_layer(fm):
-    r, t = fm.layer_surface(0.05, [0.2], 0.1, 0.4)
+    r, t = fm.layer_surface(0.05, [0.2], 0.5, 0.4)
     assert t == pytest.approx(0.15)
     assert r == pytest.approx(0.)
 
 
 def test_a_high_spot_holds_the_minimum_and_carries_the_rest(fm):
-    r1, t1 = fm.layer_surface(0.15, [0.2], 0.1, 0.4)
-    assert t1 == pytest.approx(0.1)          # cannot squash below 0.1
+    r1, t1 = fm.layer_surface(0.15, [0.2], 0.5, 0.4)
+    assert t1 == pytest.approx(0.1)          # cannot squash below h / 2
     assert r1 == pytest.approx(0.05)         # nozzle followed by 0.05
-    r2, t2 = fm.layer_surface(0.15, [0.2, 0.2], 0.1, 0.4)
+    r2, t2 = fm.layer_surface(0.15, [0.2, 0.2], 0.5, 0.4)
     assert t2 == pytest.approx(0.15)
     assert r2 == pytest.approx(0.)           # flat after layer 2
 
 
 def test_a_low_spot_holds_the_maximum_and_carries_the_rest(fm):
-    r1, t1 = fm.layer_surface(-0.3, [0.2], 0.1, 0.4)
+    r1, t1 = fm.layer_surface(-0.3, [0.2], 0.5, 0.4)
     assert t1 == pytest.approx(0.4)
     assert r1 == pytest.approx(-0.1)
-    r2, _ = fm.layer_surface(-0.3, [0.2, 0.2], 0.1, 0.4)
+    r2, _ = fm.layer_surface(-0.3, [0.2, 0.2], 0.5, 0.4)
     assert r2 == pytest.approx(0.)
 
 
 def test_max_flow_spreads_a_deep_low_spot_over_more_layers(fm):
     heights = [0.2, 0.1, 0.1, 0.1, 0.1]
     # Unlimited, layer 2 would be 0.2 thick: twice its own height.
-    _, t2 = fm.layer_surface(-0.3, heights[:2], 0.1, 0.4)
+    _, t2 = fm.layer_surface(-0.3, heights[:2], 0.5, 0.4)
     assert t2 == pytest.approx(0.2)
     # At 1.5x: layer 1 0.3 (-0.2 left), then 0.15 a layer, each taking
     # 0.05 off what is left, flat after layer 5.
     expected = [0.3, 0.15, 0.15, 0.15, 0.15]
     for n, t in enumerate(expected, 1):
-        r, got = fm.layer_surface(-0.3, heights[:n], 0.1, 0.4, 1.5)
+        r, got = fm.layer_surface(-0.3, heights[:n], 0.5, 0.4, 1.5)
         assert got == pytest.approx(t)
     assert r == pytest.approx(0.)
 
 
 def test_max_flow_never_forces_a_layer_below_its_own_height(fm):
     # 1.5 x 0.2 = 0.3 is above h, the nozzle limit 0.4 is not the cap.
-    assert fm.layer_surface(0., [0.2], 0.1, 0.4, 1.5) == (0., 0.2)
-    assert fm.layer_surface(0., [0.5], 0.1, 0.4, 1.5) == (0., 0.5)
+    assert fm.layer_surface(0., [0.2], 0.5, 0.4, 1.5) == (0., 0.2)
+    assert fm.layer_surface(0., [0.5], 0.5, 0.4, 1.5) == (0., 0.5)
 
 
-def test_a_layer_thinner_than_the_minimum_keeps_its_own_height(fm):
-    assert fm.layer_surface(0., [0.08], 0.1, 0.4) == (0., 0.08)
+def test_the_squish_limit_is_half_of_each_layers_height(fm):
+    assert fm.layer_surface(0., [0.08], 0.5, 0.4) == (0., 0.08)
+    # 0.12 mm layers over a 0.1 mm high spot: 0.06 each, 0.06 a layer off.
+    r1, t1 = fm.layer_surface(0.1, [0.12], 0.5, 0.4)
+    assert (r1, t1) == (pytest.approx(0.04), pytest.approx(0.06))
+    r2, t2 = fm.layer_surface(0.1, [0.12, 0.12], 0.5, 0.4)
+    assert (r2, t2) == (pytest.approx(0.), pytest.approx(0.08))
 
 
 def test_layers_come_from_extruding_z(fm):
@@ -183,11 +188,11 @@ def started(fm, mesh_z, mean=0., max_flow=None, **kw):
     the plain mesh, so the reference plane is pinned to `mean` (0) unless
     mean=None lets it be the mesh's own; max_flow None means unlimited."""
     printer = Printer(mesh_z, **kw)
-    obj = fm.FFFlowMesh(Config(printer, min_thickness=0.1,
+    obj = fm.FFFlowMesh(Config(printer, min_flow=0.5,
                                split_distance=2., max_flow=1.5))
     if mean is not None:
         obj._mean = lambda mesh: mean
-    obj.start(0.1, None, 0.2, max_flow or 100.)
+    obj.start(0.5, None, 0.2, max_flow or 100.)
     return obj, printer
 
 
@@ -285,10 +290,10 @@ def test_it_refuses_without_a_mesh_or_with_fade(fm):
     printer = Printer(lambda x, y: 0., fade=True)
     obj = fm.FFFlowMesh(Config(printer))
     with pytest.raises(RuntimeError, match="fade"):
-        obj.start(0.1, None, 0.2)
+        obj.start(0.5, None, 0.2)
     printer.objects["bed_mesh"].get_mesh = lambda: None
     with pytest.raises(RuntimeError, match="no bed mesh"):
-        obj.start(0.1, None, 0.2)
+        obj.start(0.5, None, 0.2)
 
 
 def test_a_purge_line_above_the_first_layer_does_not_count(fm):
@@ -330,7 +335,7 @@ def test_starting_without_a_first_layer_is_refused(fm):
     printer = Printer(lambda x, y: 0.)
     obj = fm.FFFlowMesh(Config(printer))
     with pytest.raises(RuntimeError, match="first layer height"):
-        obj.start(0.1, None, 0.)
+        obj.start(0.5, None, 0.)
 
 
 # -- the reference plane and the volumetric rate ---------------------------
@@ -378,8 +383,9 @@ def test_travel_and_retracts_keep_their_speed(fm):
 
 def test_the_configured_max_flow_is_the_default(fm):
     printer = Printer(lambda x, y: -0.001 * x)
-    obj = fm.FFFlowMesh(Config(printer, min_thickness=0.1,
+    obj = fm.FFFlowMesh(Config(printer, min_flow=0.5,
                                split_distance=2., max_flow=1.5))
-    obj.start(0.1, None, 0.2)
+    obj.start(0.5, None, 0.2)
     assert obj.run_flow == 1.5
     assert obj.get_status(0.)["max_flow"] == 1.5
+    assert obj.get_status(0.)["min_flow"] == 0.5

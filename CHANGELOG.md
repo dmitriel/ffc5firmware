@@ -18,8 +18,9 @@ both printer models or through every real-world workflow.
 
 - Flow mesh, a second bed-mesh strategy: the nozzle stays on the flat sliced
   plane and the first layers absorb the plate's unevenness in their
-  thickness, with extrusion scaled to match. A layer is never laid thinner
-  than 0.1 mm or thicker than the nozzle diameter; past those the nozzle
+  thickness, with extrusion scaled to match. A layer is never squished
+  thinner than half its own height (`min_flow`) or laid thicker than the
+  nozzle diameter; past those the nozzle
   follows the mesh just far enough, and the remainder goes into the next
   layer, until the effective mesh is flat. The nozzle follows the mesh's
   average height, and only the unevenness around it is absorbed. No layer is
