@@ -23,9 +23,22 @@
 #     nozzle on the plate at nozzle_z - station_z, which places the
 #     carriage's own underside at ~0. Default 0.0.
 #   * a mounted tool: the Z=0 of its frame -- offset_z[tool] + job_z, the
-#     same numbers _ToolTransform adds, so a G-code Z of 0.1 (before the
-#     operator's babystep) is exactly the limit. A tool without a usable
-#     calibration falls back to carriage_contact_z + nozzle_gap + z_adjust.
+#     same numbers _ToolTransform adds -- moved by the operator's Z offset
+#     (SET_GCODE_OFFSET Z / babystep, gcode_move's homing_origin), so a
+#     G-code Z of 0.1 is exactly the limit whatever the offset. A tool
+#     without a usable calibration falls back to carriage_contact_z +
+#     nozzle_gap + z_adjust, offset included.
+#
+# THE OPERATOR'S Z OFFSET is a statement about where the bed really is: a
+# negative one says the nozzle stops short of the plate, and squishing the
+# first layer by it is the point. Left out of the limit, a 0.2 mm first
+# layer with a -0.15 babystep was refused mid-print at 0.05 mm. So the
+# nozzle's bed plane follows it -- a positive offset raises the plane and
+# only makes the guard stricter -- but a NEGATIVE one is honoured only down
+# to babystep_limit (0.5 mm): a Z_ADJUST=-2 typo must not switch the guard
+# off. Past that the plane stays at -babystep_limit and the guard refuses
+# as before. The bare carriage's plane is physical, not a nozzle
+# calibration, and does not move with it.
 #   * an active bed mesh is added at the move's X/Y: the mesh is the
 #     plate's measured shape, and bed_mesh has already added it to the move.
 #     Under tilt correction bed_mesh holds the plate in the tilted frame;
@@ -102,6 +115,11 @@ class FFBedGuard:
         # have numbers for).
         self.nozzle_gap = config.getfloat('nozzle_gap', 3.2, minval=0.)
         self.enabled = config.getboolean('enable', True)
+        # How far a NEGATIVE operator Z offset may lower the nozzle's bed
+        # plane; see THE OPERATOR'S Z OFFSET above.
+        self.babystep_limit = config.getfloat('babystep_limit', 0.5,
+                                              minval=0.)
+        self.gcode_move = None
         self.mesh_tolerance = config.getfloat('mesh_tolerance', None,
                                               minval=0.)
 
@@ -122,6 +140,7 @@ class FFBedGuard:
 
     def _handle_connect(self):
         self.toolchange = self.printer.lookup_object('ff_toolchange', None)
+        self.gcode_move = self.printer.lookup_object('gcode_move', None)
         self.bed_mesh = self.printer.lookup_object('bed_mesh', None)
         if self.mesh_tolerance is None:
             splitter = getattr(self.bed_mesh, 'splitter', None)
@@ -169,6 +188,14 @@ class FFBedGuard:
             homed = [a in status['homed_axes'] for a in 'xyz']
         return homed[0] and homed[1], homed[2]
 
+    def _babystep(self):
+        """The operator's Z offset as the guard honours it: in full when
+        positive, down to -babystep_limit when negative."""
+        if self.gcode_move is None:
+            return 0.
+        z = self.gcode_move.homing_position[2]
+        return max(z, -self.babystep_limit)
+
     def _nozzle_contact(self, tool):
         """Machine Z at which `tool`'s nozzle meets a flat, unmeshed bed."""
         tc = self.toolchange
@@ -177,7 +204,7 @@ class FFBedGuard:
         else:
             base = (self.carriage_contact_z + self.nozzle_gap
                     + tc.tools[tool].z_adjust)
-        return base + tc.job_z
+        return base + tc.job_z + self._babystep()
 
     def _contacts(self, mounted):
         """Machine Z of the lowest point on the carriage, flat bed.
@@ -188,7 +215,7 @@ class FFBedGuard:
         tc = self.toolchange
         if tc is None:
             # No toolchanger to ask: assume a nozzle on the carriage.
-            return contact + self.nozzle_gap
+            return contact + self.nozzle_gap + self._babystep()
         if mounted is None:
             tools = range(len(tc.tools))
         elif mounted < 0:
@@ -313,17 +340,30 @@ class FFBedGuard:
         else:
             what = "T%d's nozzle" % mounted
         msg = ("Bed guard: move would put %s %.3f mm from the bed at"
-               " X%.2f Y%.2f (minimum %.2f%s; bed plane at machine Z %.3f)."
+               " X%.2f Y%.2f (minimum %.2f%s; bed plane at machine Z %.3f%s)."
                " Raise Z first; SET_BED_GUARD ENABLE=0 overrides"
                % (what, clearance, where[0], where[1], self.min_clearance,
                   " less %.3f mesh tolerance" % slack if slack else "",
-                  contact))
+                  contact, self._describe_babystep(mounted)))
         self.blocked += 1
         self.last_block = msg
         logging.warning("ff_bed_guard: %s; move %s -> %s", msg,
                         tuple(round(v, 3) for v in move.start_pos[:3]),
                         tuple(round(v, 3) for v in move.end_pos[:3]))
         raise move.move_error(msg)
+
+    def _describe_babystep(self, mounted):
+        """', Z offset -0.150 included' -- or why not all of it -- for a
+        nozzle's plane; nothing when there is no offset or no nozzle."""
+        if self.gcode_move is None or (mounted is not None and mounted < 0):
+            return ""
+        z = self.gcode_move.homing_position[2]
+        if abs(z) < EPSILON:
+            return ""
+        if z < -self.babystep_limit:
+            return (", Z offset %+.3f included only to -%.3f (babystep_limit)"
+                    % (z, self.babystep_limit))
+        return ", Z offset %+.3f included" % (z,)
 
     # ---------------- commands / status ----------------
 
@@ -348,10 +388,11 @@ class FFBedGuard:
         if self.suspend_reasons:
             lines.append("suspended by: %s" % ", ".join(self.suspend_reasons))
         mounted = status['tool']
-        lines.append("lowest point (%s) meets a flat bed at machine Z %.3f"
+        lines.append("lowest point (%s) meets a flat bed at machine Z %.3f%s"
                      % ('tool unknown' if mounted is None else
                         'bare carriage' if mounted < 0 else 'T%d' % mounted,
-                        status['bed_plane_z']))
+                        status['bed_plane_z'],
+                        self._describe_babystep(mounted)))
         if self.last_block:
             lines.append("last refused (%d so far): %s"
                          % (self.blocked, self.last_block))
@@ -368,6 +409,8 @@ class FFBedGuard:
                 'bed_max': list(self.bed_max),
                 'tool': mounted,
                 'bed_plane_z': self._contacts(mounted),
+                'babystep': self._babystep(),
+                'babystep_limit': self.babystep_limit,
                 'blocked': self.blocked}
 
 

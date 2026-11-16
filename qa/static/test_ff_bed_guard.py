@@ -106,7 +106,10 @@ class Printer:
         self.kin = Kinematics(homed)
         self.toolhead = Toolhead(self, self.kin)
         self.handlers = {}
-        self.objects = {"gcode": self.gcode, "toolhead": self.toolhead}
+        # SET_GCODE_OFFSET Z lands in homing_position[2] (homing_origin).
+        self.gcode_move = SimpleNamespace(homing_position=[0., 0., 0., 0.])
+        self.objects = {"gcode": self.gcode, "toolhead": self.toolhead,
+                        "gcode_move": self.gcode_move}
         if toolchange is not None:
             self.objects["ff_toolchange"] = toolchange
         if mesh is not None:
@@ -211,6 +214,48 @@ def test_unknown_tool_assumes_the_lowest(ff_bed_guard):
     with pytest.raises(CommandError, match="tool unknown"):
         printer.toolhead.move([100., 100., 3.35, 0.])   # T2 is at 3.3
     printer.toolhead.move([100., 100., 3.4, 0.])
+
+
+def test_a_negative_z_offset_squishes_without_a_refusal(ff_bed_guard):
+    # A 0.2 mm first layer with a -0.15 babystep: the nozzle is 0.05 above
+    # the calibrated plane -- where the operator SAYS the bed really is.
+    printer, guard, _tc = install(ff_bed_guard)
+    printer.gcode_move.homing_position[2] = -0.15
+    printer.toolhead.move([100., 100., 3.2 + 0.2 - 0.15, 0.])
+    # Still 0.1 above THAT plane, and no closer.
+    with pytest.raises(CommandError, match=r"Z offset -0\.150 included"):
+        printer.toolhead.move([110., 100., 3.2 - 0.15 + 0.09, 0.])
+    assert guard.get_status(0.)['babystep'] == pytest.approx(-0.15)
+
+
+def test_a_huge_negative_offset_is_honoured_only_to_the_limit(ff_bed_guard):
+    printer, _guard, _tc = install(ff_bed_guard)
+    printer.gcode_move.homing_position[2] = -2.0     # a Z_ADJUST typo
+    printer.toolhead.move([100., 100., 3.2 - 0.5 + 0.1, 0.])
+    with pytest.raises(CommandError, match="only to -0.500"):
+        printer.toolhead.move([110., 100., 3.2 - 1.0, 0.])
+
+
+def test_the_babystep_limit_is_configurable(ff_bed_guard):
+    printer, _guard, _tc = install(ff_bed_guard, babystep_limit=0.)
+    printer.gcode_move.homing_position[2] = -0.15
+    with pytest.raises(CommandError):                # the old behaviour
+        printer.toolhead.move([100., 100., 3.2 + 0.2 - 0.15, 0.])
+
+
+def test_a_positive_z_offset_raises_the_plane(ff_bed_guard):
+    printer, _guard, _tc = install(ff_bed_guard)
+    printer.gcode_move.homing_position[2] = 0.3
+    with pytest.raises(CommandError, match=r"\+0\.300"):
+        printer.toolhead.move([100., 100., 3.2 + 0.35, 0.])
+    printer.toolhead.move([100., 100., 3.2 + 0.4, 0.])
+
+
+def test_the_bare_carriage_ignores_the_z_offset(ff_bed_guard):
+    printer, _guard, _tc = install(ff_bed_guard, mounted=-1)
+    printer.gcode_move.homing_position[2] = -0.4
+    with pytest.raises(CommandError, match="bare carriage"):
+        printer.toolhead.move([100., 100., 0.05, 0.])
 
 
 def test_job_z_and_z_adjust_move_the_plane(ff_bed_guard):
