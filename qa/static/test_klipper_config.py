@@ -1067,3 +1067,51 @@ def test_a_paused_filament_op_may_use_the_tool_the_print_resumes_with(
         with pytest.raises(AssertionError, match="resumes with T2"):
             _render_one(model, "_FF_FILAMENT_PREP",
                         {"TOOL": tool, "TEMP": 250}, extra=printer)
+
+# -- tilt correction ---------------------------------------------------------
+
+@pytest.mark.parametrize("model", MODELS)
+def test_tilt_correction_scans_early_and_applies_after_the_last_clean(model):
+    out, _ = _render_one(model, "START_PRINT", {
+        "BED": "60", "TOOL": "0", "NOZZLE": "220", "LAYER": "0.2"},
+        extra=_identity())
+    # The scan runs in the background from before homing (the bed heats
+    # meanwhile); the frame tilts once the mesh is loaded and the first tool
+    # is clean, before the flow mesh would start.
+    assert _first(out, "_FF_PREFLIGHT") < _first(out, "_FF_TILT_SCAN") < \
+        _first(out, "G28")
+    assert _first(out, "_FF_MESH") < \
+        _first(out, "_FF_NOZZLE_CLEAN MODE=print") < \
+        _first(out, "_FF_TILT_BEGIN") < _first(out, "_FF_FLOW_MESH_BEGIN")
+    off, _ = _render_one(model, "START_PRINT", {
+        "BED": "60", "TOOL": "0", "NOZZLE": "220", "MESH": "off"},
+        extra=_identity())
+    assert not any(c.startswith("_FF_TILT_BEGIN") for c in off)
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("tilt, flow, expected", [
+    (0, 0, []),
+    (1, 0, ["TILT_CORRECTION_START OPTIONAL=1"]),
+    (1, 1, ["TILT_CORRECTION_START OPTIONAL=1"]),   # combined: flow absorbs
+    (0, 1, []),                                      # the residual
+])
+def test_tilt_correction_follows_its_toggle_alongside_the_flow_mesh(
+        model, tilt, flow, expected):
+    extra = {"gcode_macro TILT_CORRECTION_TOGGLE": {"enabled": tilt},
+             "gcode_macro FLOW_MESH_TOGGLE": {"enabled": flow}}
+    out, info = _run(model, "_FF_TILT_BEGIN", has_heater=False, extra=extra)
+    assert out == expected
+    assert info == []
+    scan, _ = _run(model, "_FF_TILT_SCAN", has_heater=False, extra=extra)
+    assert scan == (["TILT_CORRECTION_SCAN"] if tilt else [])
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_end_print_untilts_the_frame_before_clearing_the_mesh(model):
+    out, _ = _render_one(model, "END_PRINT", {}, extra={
+        "toolhead": {"position": {"z": 50.0}, "homed_axes": "xyz"}})
+    # Flow mesh off first (it sits above the tilt), then the tilt, which
+    # hands the measured mesh back, then the mesh is cleared.
+    assert _first(out, "FLOW_MESH_STOP") < _first(out, "TILT_CORRECTION_STOP") \
+        < _first(out, "BED_MESH_CLEAR")
