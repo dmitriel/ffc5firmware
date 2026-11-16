@@ -1,7 +1,10 @@
 # Cancelling an object stalls the host into "Timer too close"
 
-**Status: diagnosed, not fixed.** The measurements below are from a Creator 5 Pro
-running the current mod; the fix at the end is written but unwritten to code.
+**Status: fixed in the reader, not yet re-tested by a cancel on the printer.** The
+measurements below are from a Creator 5 Pro running the current mod. The fix
+proposed at the end, a yield inside `ExcludeObject`, was not taken: the same
+starvation turned up without a cancel ([note 54](54-reader-reactor-starvation.md)),
+so the yield went into `virtual_sdcard`'s reader instead, which covers both.
 
 Cancelling an object mid-print — `EXCLUDE_OBJECT NAME=…`, what Mainsail's and
 HelixScreen's "cancel this object" buttons send — makes Klipper read the rest of the

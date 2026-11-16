@@ -80,6 +80,14 @@ done
 # multi-extruder regression.
 pkg_stage "$PKG_DIR/payload/klipper/klippy/extras/exclude_object.py" \
           "klipper/klippy/extras/exclude_object.py"
+# The fork's virtual_sdcard yields to the reactor once per 8 KB read and
+# otherwise only when the toolhead pauses it, so a long run of moves that
+# never reach the motion queue (the toolhead priming after a flush, or a
+# cancelled object) starves the reactor into "Timer too close". The overlay
+# adds a time-based yield; qa/static/test_virtual_sdcard.py holds it, and
+# docs/notes/54-reader-reactor-starvation.md has the incident.
+pkg_stage "$PKG_DIR/payload/klipper/klippy/extras/virtual_sdcard.py" \
+          "klipper/klippy/extras/virtual_sdcard.py"
 
 # FLASHFORGE'S OWN chelper, at $MODDIR/prog/stock-chelper and never on klippy's
 # path. anvil-link-prog.sh puts it back over /usr/prog/klipper/klippy/chelper
