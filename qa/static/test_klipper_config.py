@@ -1073,7 +1073,8 @@ def test_a_paused_filament_op_may_use_the_tool_the_print_resumes_with(
 @pytest.mark.parametrize("model", MODELS)
 def test_tilt_correction_scans_early_and_applies_after_the_last_clean(model):
     out, _ = _render_one(model, "START_PRINT", {
-        "BED": "60", "TOOL": "0", "NOZZLE": "220", "LAYER": "0.2"})
+        "BED": "60", "TOOL": "0", "NOZZLE": "220", "LAYER": "0.2"},
+        extra=_identity())
     # The scan runs in the background from before homing (the bed heats
     # meanwhile); the frame tilts once the mesh is loaded and the first tool
     # is clean, before the flow mesh would start.
@@ -1083,7 +1084,8 @@ def test_tilt_correction_scans_early_and_applies_after_the_last_clean(model):
         _first(out, "_FF_NOZZLE_CLEAN MODE=print") < \
         _first(out, "_FF_TILT_BEGIN") < _first(out, "_FF_FLOW_MESH_BEGIN")
     off, _ = _render_one(model, "START_PRINT", {
-        "BED": "60", "TOOL": "0", "NOZZLE": "220", "MESH": "off"})
+        "BED": "60", "TOOL": "0", "NOZZLE": "220", "MESH": "off"},
+        extra=_identity())
     assert not any(c.startswith("_FF_TILT_BEGIN") for c in off)
 
 

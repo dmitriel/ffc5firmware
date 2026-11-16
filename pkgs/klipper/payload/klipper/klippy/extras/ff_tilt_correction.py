@@ -920,7 +920,20 @@ class FFTiltCorrection:
         gcode_move = self.printer.lookup_object('gcode_move')
         babystep = list(gcode_move.homing_position[:3])
 
-        def resolve(tool):
+        toolchange = self._toolchange()
+
+        def resolve(number):
+            """The scan keys moves by the file's tool NUMBER (its bare T<n>);
+            offsets belong to the PHYSICAL tool that number selects, which
+            ASSIGN_TOOL can change. Moves before the first T<n> run on the
+            tool mounted now. A number with no tool cannot print anyway;
+            its moves are placed with the mounted tool's offsets."""
+            if number is None:
+                return initial
+            lookup = getattr(toolchange, '_tool_for_number', None)
+            if lookup is None:
+                return number
+            tool = lookup(number)
             return initial if tool is None else tool
 
         # The footprint, in toolhead coordinates, one point per cell.
