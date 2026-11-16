@@ -8,6 +8,14 @@ both printer models or through every real-world workflow.
 
 ### Added
 
+- Tool remapping, before or during a print: `ASSIGN_TOOL TOOL=T2 N=0` makes
+  the file's `T0` -- its tool changes, its `M104`/`M109 T0` and
+  `START_PRINT`'s tool list -- use the head in dock 3, with
+  klipper-toolchanger's rules, so HelixScreen's tool mapping works. While
+  paused, `RESUME` heats each tool to the temperature of the number it now
+  has and swaps in the tool behind the paused number. Not yet tested on
+  hardware. See [Remapping tools](docs/printing.md#remapping-tools).
+
 - Tilt correction: the print's coordinate frame is tilted to stand square on
   the bed's fitted plane, so a plate whose tramming has moved with
   temperature no longer makes the part lean. `START_PRINT` scans the file in
@@ -48,13 +56,24 @@ both printer models or through every real-world workflow.
   needs no `ADAPTIVE_MESH` call, and it runs before the first tool's clean.
   Every print says which mesh and strategy it uses. The flow mesh keeps its
   own `FLOW_MESH_TOGGLE`.
-- Thermal mesh map: `THERMAL_MESH_SWEEP` probes full meshes at every bed and
-  chamber temperature pair in a range (serpentine order, heat-soaked, repeated
-  until two agree within a threshold) and stores them in `thermal_mesh.json`;
-  `THERMAL_MESH_ANALYZE` finds the four mesh points most sensitive to each
-  temperature; `THERMAL_MESH_APPLY` probes only those and loads a mesh
-  interpolated from the closest matches (`bilinear`, `idw`, `nearest`, or
-  `temperature` without probing). Not used unless called. See
+- Thermal mesh map: `THERMAL_MESH_SWEEP` probes full meshes over a range of
+  bed and chamber temperatures, hottest chamber first and the bed from
+  hottest down within each, never with the bed below the chamber. The
+  chamber is soaked once (and at every chamber step if `CHAMBER_STEP_SOAK`
+  is set); each lower chamber set waits for it to cool and is
+  skipped if it does not within `COOL_TIMEOUT`; the first bed step of each set
+  soaks longer (`MAX_SOAK`). Each pair is probed until a mesh verifies the one
+  before it: the probe's precision is measured right after, and the two must
+  be identical at 95 % confidence -- average error statistically 0 and every
+  node within the probe's noise -- as many meshes as that takes. The pair's
+  node-by-node mean is then stored, with how long after reaching temperature
+  it settled (`soak_time`), in `thermal_mesh.json` with the temperatures
+  measured around it. `THERMAL_MESH_ANALYZE` fits, per mesh node, the bed's
+  and the chamber's warp separately against those measured temperatures, and
+  picks the four points that best tell the two apart; `THERMAL_MESH_APPLY`
+  probes only those, solves for the bed and chamber state that fits them and
+  loads that mesh (`model`; also `bilinear`, `idw`, `nearest`, or
+  `temperature` without probing). See
   [the thermal mesh page](docs/thermal-mesh.md).
 - A bed-collision guard. Klipper did not know where the bed was, so a jog, a
   macro or a typed `G1` could drive the nozzle, or the carriage with no tool
@@ -119,6 +138,43 @@ both printer models or through every real-world workflow.
 
 ### Fixed
 
+- The thermal sweep no longer probes the same pair over and over without
+  ever verifying. Each mesh is homed on the plate first, and that homing
+  touch shifts the whole mesh by its own small error; the check that two
+  meshes match treated the shift as real movement unless a
+  `zero_reference_position` was set, so on a settled plate it kept
+  failing. It now always allows for that one touch.
+- The thermal sweep measured the probe's noise about seven times too low,
+  so even a settled bed could not verify. Each of its readings was secretly
+  the median of ten touches (the probe took its `SAMPLES=10` as touches per
+  reading), and all of them were at the middle of the bed, where the probe
+  scatters least. It now reads nine nodes spread over the mesh, the way the
+  mesh itself reads them, and pools their spread. `precision_samples` is
+  now readings per node, 4 by default.
+- A long thermal sweep could shut the printer down ("MCU shutdown: Timer
+  too close"). The map file, every mesh in it, is rewritten after each
+  pair, and late in a sweep that took the printer's CPU long enough to stop
+  Klipper keeping up with the board. It is now written in the background.
+- The thermal sweep no longer skips a pair whose bed target equals the
+  chamber's because the chamber read a tenth of a degree over it. A bed
+  target is skipped only when the chamber is more than `bed_tolerance`
+  (1 °C) above it, and a bed the warm chamber holds a little over its
+  target is accepted rather than waited on. The bed and the chamber now
+  share one tolerance, `temp_tolerance` (1 °C, replacing `bed_tolerance` and
+  `chamber_tolerance`), so the cool-down to a lower chamber set ends where
+  its bed = chamber pair can start, instead of 1 °C short of it.
+- The thermal sweep runs the chamber fan at full speed while it waits for
+  the chamber to cool to a lower set, and puts it back to its previous
+  speed afterwards (`cool_fan` / `cool_fan_speed` in `[ff_thermal_mesh]`).
+- `LOAD_FILAMENT`, `UNLOAD_FILAMENT` and `PURGE` with a tool mounted and the
+  motors off no longer run on an empty carriage. Homing docks the mounted
+  tool before it homes Z, but the macro had already decided the tool was on
+  the carriage and skipped picking it up again, so it travelled to the purge
+  chute and fed filament with no tool on. It now picks the tool back up after
+  homing.
+- HelixScreen no longer shows the wrong tool as active after you remap a
+  tool there. It kept its remap even though the printer refused it; the
+  printer now carries the remap out (see Added).
 - `RESUME` after a `PURGE`, `LOAD_FILAMENT` or `UNLOAD_FILAMENT` during a
   pause no longer drives the mounted tool into a docked one. Those macros
   leave the head at the purge chute or the wipe spot, beside the docks, and

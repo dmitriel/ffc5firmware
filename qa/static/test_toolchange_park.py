@@ -43,6 +43,7 @@ def parking(monkeypatch):
     monkeypatch.setattr(tc, "_station_z", lambda: None)
     tc.tools = []
     tc.armed_tool = -1
+    tc.tool_numbers = list(range(module.EXTRUDER_COUNT))
     tc.job_z = 0.0
     tc.gcode_transform = SimpleNamespace(tool=0)
     view = module._ToolchangerView(tc)
