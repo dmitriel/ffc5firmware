@@ -125,6 +125,7 @@ nav:
           - Automatic pressure advance: notes/51-pa-calibration-recovered.md
           - Cancelling an object stalls the host: notes/52-exclude-object-stall.md
           - Filament slot metadata: notes/53-filament-slot-metadata.md
+          - The SD reader starves the host: notes/54-reader-reactor-starvation.md
           - Filament, calibration, persistent state: notes/60-background.md
           - Migrating to s6: notes/80-s6-migration.md
           - Packaging with apk: notes/85-packaging.md
