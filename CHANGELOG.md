@@ -154,6 +154,13 @@ both printer models or through every real-world workflow.
   the motors stayed powered. The flow mesh now comes off from wherever it
   sits. `END_PRINT` also turns the heaters and fans off before any step
   that can fail.
+- A print could shut down mid-file with "MCU shutdown: Timer too close",
+  most likely just after a tool change followed by many tiny moves (support
+  interface dots, arc-fitted detail), or after cancelling an object. Klipper
+  read the file for seconds without letting its other work run, and motor
+  steps reached the boards late. The file reader now hands Klipper a turn at
+  least every 20 ms. Not yet tested on hardware. Details in
+  [note 54](docs/notes/54-reader-reactor-starvation.md).
 - The thermal sweep no longer probes the same pair over and over without
   ever verifying. Each mesh is homed on the plate first, and that homing
   touch shifts the whole mesh by its own small error; the check that two
