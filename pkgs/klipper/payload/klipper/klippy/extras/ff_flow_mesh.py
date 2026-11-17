@@ -55,15 +55,17 @@ to the plane, and the nozzle stays on the tilted plane, not machine Z.
 
 HOW IT SITS IN KLIPPER. bed_mesh keeps its mesh loaded and goes on adding
 it to every move, so ff_bed_guard, the screens and anything else that reads
-it see the real plate. This transform sits at the top of the chain, above
-ff_toolchange's per-tool frame, and sends each move down with
+it see the real plate. This transform sits above ff_toolchange's per-tool
+frame -- at the top of the chain, until a print excludes an object and
+exclude_object installs over it -- and sends each move down with
 (r - mesh) added to Z: bed_mesh's own +mesh cancels the mesh part, leaving
 the nozzle at G-code Z + r. Moves are split every split_distance so that
 cancellation holds along the move and not only at its ends. Dock moves,
 which ff_toolchange runs in raw machine coordinates, pass through untouched.
 
 FLOW_MESH_START turns it on for one print and FLOW_MESH_STOP off; END_PRINT
-stops it. Nothing here runs unless started.
+stops it, from wherever it sits in the chain. Nothing here runs unless
+started.
 """
 
 import logging
@@ -71,6 +73,30 @@ import math
 
 EPSILON = 1e-4
 FLAT_TOLERANCE = 1e-4
+
+
+def unlink_move_transform(gcode_move, transform):
+    """Take `transform` out of gcode_move's chain wherever it sits.
+
+    The same helper as exclude_object's (kept local: extras load standalone).
+    exclude_object installs itself on top at the first EXCLUDE_OBJECT, after
+    this transform went on, and stays until the next file starts -- so at
+    END_PRINT we are usually NOT the head, and requiring it made
+    FLOW_MESH_STOP fail and abort the whole exit sequence. Relink our
+    predecessor instead; it calls next_transform.move() at move time."""
+    if gcode_move.move_transform is transform:
+        gcode_move.set_move_transform(transform.next_transform, force=True)
+        return True
+    node = gcode_move.move_transform
+    for _ in range(32):
+        below = getattr(node, 'next_transform', None)
+        if below is None:
+            return False
+        if below is transform:
+            node.next_transform = transform.next_transform
+            return True
+        node = below
+    return False
 
 
 def layer_surface(mesh_z, heights, min_thickness, max_thickness):
@@ -306,11 +332,10 @@ class FFFlowMesh:
         if not self.active:
             return False
         gcode_move = self.printer.lookup_object('gcode_move')
-        if gcode_move.move_transform is not self:
+        if not unlink_move_transform(gcode_move, self):
             raise self.gcode.error(
-                "flow mesh: another move transform was installed above it; "
-                "cannot remove it safely")
-        gcode_move.set_move_transform(self.next_transform, force=True)
+                "flow mesh: not found in the move transform chain (under a "
+                "transform that hides its next one?); cannot remove it safely")
         self.active = False
         # The extruder is e_shift ahead of the G-code E; keep the G-code E
         # where the file thinks it is, or an absolute-E move would jump.

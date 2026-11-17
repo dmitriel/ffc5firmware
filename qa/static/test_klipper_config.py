@@ -1115,3 +1115,15 @@ def test_end_print_untilts_the_frame_before_clearing_the_mesh(model):
     # hands the measured mesh back, then the mesh is cleared.
     assert _first(out, "FLOW_MESH_STOP") < _first(out, "TILT_CORRECTION_STOP") \
         < _first(out, "BED_MESH_CLEAR")
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_end_print_turns_the_heat_off_before_anything_that_can_fail(model):
+    # A macro stops at its first error. FLOW_MESH_STOP refusing used to leave
+    # both nozzles and the bed at print temperature.
+    out, _ = _render_one(model, "END_PRINT", {}, extra={
+        "toolhead": {"position": {"z": 50.0}, "homed_axes": "xyz"}})
+    heat_off = _first(out, "TURN_OFF_HEATERS")
+    for cmd in ("FLOW_MESH_STOP", "TILT_CORRECTION_STOP", "TOOLCHANGE_PARK",
+                "G1 E-1"):
+        assert heat_off < _first(out, cmd), cmd

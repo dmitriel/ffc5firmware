@@ -72,6 +72,8 @@ def build_transform(tool="extruder2", position=(0., 0., 0., 100.)):
     eo.last_position = [0., 0., 0., 0.]
     eo.current_object = None
     eo.excluded_objects = ["BAD"]
+    eo.toolchange = None
+    eo.pause_resume = None
     eo.get_position()
     return eo
 
@@ -180,3 +182,94 @@ def test_large_adjustment_logs_complete_diagnostic(caplog):
     assert "large E correction -20.000000 mm for extruder" in messages
     assert "normal=0.000000/20.000000" in messages
     assert "xyz_offset=" in messages
+
+
+# -- moves the machine makes for itself ------------------------------------
+# Orca puts the wipe tower, and the T<n> before it, inside the label of the
+# object it was printing. With that object excluded, the toolchanger's own
+# dock moves were dropped as "inside the object": the carriage never reached
+# the dock and the release failed with E0138 (toolchange #238 of the print
+# that found this).
+
+class Flag:
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+
+def test_toolchange_moves_inside_an_excluded_label_still_run():
+    eo = build_transform(tool="extruder", position=(10., 10., 1., 0.))
+    eo.toolchange = Flag(changing=False)
+    eo.current_object = "BAD"
+    eo.move([50., 50., 1., 2.], 100.)      # the object's own move: dropped
+    assert eo.next_transform.position == [10., 10., 1., 0.]
+
+    eo.toolchange.changing = True          # T<n> inside the BAD label
+    eo.move([250., 50., 1., 2.], 500.)     # G1 X250
+    eo.move([297., 120., 1., 2.], 500.)    # to the dock
+    assert eo.next_transform.position[:3] == [297., 120., 1.]
+
+    eo.toolchange.changing = False         # back to the file: dropped again
+    eo.move([60., 60., 1., 3.], 100.)
+    assert eo.next_transform.position[:3] == [297., 120., 1.]
+
+
+def test_moves_while_paused_inside_an_excluded_label_still_run():
+    eo = build_transform(tool="extruder", position=(10., 10., 1., 0.))
+    eo.pause_resume = Flag(is_paused=False)
+    eo.current_object = "BAD"
+    eo.pause_resume.is_paused = True
+    eo.move([10., 10., 11., 0.], 10.)      # PAUSE's park lift
+    assert eo.next_transform.position[:3] == [10., 10., 11.]
+
+
+def test_a_change_of_e_below_moves_the_e_history_with_it():
+    eo = build_transform(tool="extruder", position=(0., 0., 0., 10.))
+    eo.move([0., 0., 0., 8.], 20.)         # normal retract: 2 mm debt
+    # A transform under us (the flow mesh) goes away and hands back 5 mm of
+    # flow scaling: physical E is now 5 lower than what we sent.
+    eo.next_transform.position[3] = 3.
+    eo.get_position()
+    eo.current_object = "BAD"
+    eo.move([5., 5., 0., 2.], 20.)         # suppressed retract
+    eo.move([6., 6., 0., 4.], 20.)         # suppressed partial unretract
+    eo.current_object = None
+    eo.move([20., 20., 0., 4.], 100.)
+    # Same arithmetic as the single-extruder test, shifted by -5: without
+    # the rebase the stale max_normal (10) would read as a 7 mm retraction.
+    assert eo.next_transform.position == [20., 20., 0., 4.]
+
+
+class Chain:
+    """gcode_move's head with a transform installed over exclude_object."""
+
+    def __init__(self, head):
+        self.move_transform = head
+        self.resets = 0
+
+    def set_move_transform(self, transform, force=False):
+        old, self.move_transform = self.move_transform, transform
+        return old
+
+    def reset_last_position(self):
+        self.resets += 1
+
+
+def test_unregistering_from_under_another_transform_keeps_it():
+    module = load_module()
+    eo = build_transform()
+    bottom = eo.next_transform
+    above = Flag(next_transform=eo)
+    gcode_move = Chain(above)
+    eo.gcode_move = gcode_move
+    eo.printer = Flag(lookup_object=lambda name, default=None:
+                      Flag(is_active=lambda: False))
+    eo._unregister_transform()
+    assert gcode_move.move_transform is above
+    assert above.next_transform is bottom
+    assert eo.next_transform is None
+
+
+def test_unlink_refuses_what_is_not_in_the_chain():
+    module = load_module()
+    gcode_move = Chain(Flag(next_transform=None))
+    assert not module.unlink_move_transform(gcode_move, Flag())

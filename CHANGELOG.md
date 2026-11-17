@@ -138,6 +138,22 @@ both printer models or through every real-world workflow.
 
 ### Fixed
 
+- Excluding an object no longer makes the next tool change fail. Orca puts
+  the prime tower, and the `T<n>` before it, inside the label of the object
+  it was printing; with that object excluded, the toolchanger's own moves to
+  the dock were thrown away as "inside the object", the carriage never
+  reached the dock, and the print stopped with `E0138` ("tool never read as
+  seated in its dock"). Moves made during a tool change, and while a print
+  is paused (the park lift, filament loading, the travel back), are now
+  never excluded. The excluded object's own moves, and the prime tower
+  inside its label, are still skipped.
+- `END_PRINT` no longer stops halfway after an object was excluded. The
+  exclusion sits on top of the flow mesh, and `FLOW_MESH_STOP` refused to
+  take the flow mesh off from underneath it. Because a macro stops at its
+  first error, the heaters stayed on, the tool stayed on the carriage and
+  the motors stayed powered. The flow mesh now comes off from wherever it
+  sits. `END_PRINT` also turns the heaters and fans off before any step
+  that can fail.
 - A print could shut down mid-file with "MCU shutdown: Timer too close",
   most likely just after a tool change followed by many tiny moves (support
   interface dots, arc-fitted detail), or after cancelling an object. Klipper

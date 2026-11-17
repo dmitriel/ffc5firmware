@@ -12,6 +12,34 @@ import json
 LARGE_EXTRUDER_ADJUSTMENT = 5.0
 
 
+def unlink_move_transform(gcode_move, transform):
+    """Take `transform` out of gcode_move's chain wherever it sits.
+
+    Transforms install with set_move_transform(force=True), each on top of
+    whatever was there, and nothing keeps them in the order they will be
+    removed in: exclude_object installs at the first EXCLUDE_OBJECT, which can
+    be long after ff_flow_mesh went on. Handing the head back to our own
+    next_transform is only right when we ARE the head -- anywhere else it
+    silently drops every transform above us. So relink our predecessor
+    instead. Every transform here calls self.next_transform.move() at move
+    time, so the new link takes effect on the next move; the caller resets
+    gcode_move's cached position. Returns False if `transform` is not in the
+    chain or sits under something that does not expose next_transform."""
+    if gcode_move.move_transform is transform:
+        gcode_move.set_move_transform(transform.next_transform, force=True)
+        return True
+    node = gcode_move.move_transform
+    for _ in range(32):
+        below = getattr(node, 'next_transform', None)
+        if below is None:
+            return False
+        if below is transform:
+            node.next_transform = transform.next_transform
+            return True
+        node = below
+    return False
+
+
 class ExcludeObject:
     def __init__(self, config):
         self.printer = config.get_printer()
@@ -22,6 +50,8 @@ class ExcludeObject:
         self.printer.register_event_handler("virtual_sdcard:reset_file",
                                             self._reset_file)
         self.next_transform = None
+        self.pause_resume = None
+        self.toolchange = None
 
         self._reset_state()
         self.gcode.register_command(
@@ -63,6 +93,8 @@ class ExcludeObject:
 
     def _handle_connect(self):
         self.toolhead = self.printer.lookup_object('toolhead')
+        self.pause_resume = self.printer.lookup_object('pause_resume', None)
+        self.toolchange = self.printer.lookup_object('ff_toolchange', None)
 
     def _unregister_transform(self):
         if self.next_transform:
@@ -73,7 +105,10 @@ class ExcludeObject:
                               'the transform chain.')
                 return
 
-            self.gcode_move.set_move_transform(self.next_transform, force=True)
+            if not unlink_move_transform(self.gcode_move, self):
+                logging.error('exclude_object: move transform not found in'
+                              ' the chain; left in place')
+                return
             self.next_transform = None
             self.gcode_move.reset_last_position()
 
@@ -104,6 +139,8 @@ class ExcludeObject:
             'pending_adjustment': 0.,
             'was_ignored': False,
             'last_excluded_object': None,
+            # The E we last saw below us, to notice a frame change there.
+            'physical': e_position,
         }
 
     @staticmethod
@@ -152,10 +189,26 @@ class ExcludeObject:
                                       for i in range(3)]
         self.physical_xyz = list(xyz)
 
+    @staticmethod
+    def _rebase_e(state, physical_e):
+        # The E analogue of _rebase_spatial_position. E below us changes
+        # without a move through us when a transform under us goes away --
+        # ff_flow_mesh hands back its accumulated flow scaling when it stops.
+        # Virtual E follows (last_virtual is physical + offset), so move the
+        # E history with it; otherwise the next excluded region compares new
+        # E against old maxima and invents a retraction of that size.
+        delta = physical_e - state['physical']
+        if delta:
+            for key in ('last_normal', 'max_normal',
+                        'last_excluded', 'max_excluded'):
+                state[key] += delta
+        state['physical'] = physical_e
+
     def get_position(self):
         pos = self.next_transform.get_position()
         self._rebase_spatial_position(pos[:3])
         state = self._select_e_state(pos[3])
+        self._rebase_e(state, pos[3])
         state['last_virtual'] = pos[3] + state['offset']
         self.last_position = [pos[i] + self.xyz_offset[i] for i in range(3)]
         self.last_position.append(state['last_virtual'])
@@ -171,6 +224,7 @@ class ExcludeObject:
         pos = self.next_transform.get_position()
         self._rebase_spatial_position(pos[:3])
         state = self._select_e_state(pos[3])
+        self._rebase_e(state, pos[3])
         state['last_virtual'] = pos[3] + state['offset']
         self.last_position = [pos[i] + self.xyz_offset[i] for i in range(3)]
         self.last_position.append(state['last_virtual'])
@@ -234,6 +288,7 @@ class ExcludeObject:
         self.next_transform.move(tx_pos, speed)
 
         self.physical_xyz = list(tx_pos[:3])
+        state['physical'] = tx_pos[3]
         state['last_virtual'] = newpos[3]
         state['last_normal'] = newpos[3]
         state['max_normal'] = max(state['max_normal'], newpos[3])
@@ -263,9 +318,28 @@ class ExcludeObject:
             "current_object": self.current_object
         }
 
+    def _machine_owns_motion(self):
+        """Moves that are not the file's own must never be excluded.
+
+        Exclusion is keyed on the file's EXCLUDE_OBJECT_START/END, but every
+        G1 goes through this transform -- including the ones the firmware
+        makes for itself while the file sits inside a label. Orca puts its
+        wipe tower, and the T<n> before it, inside the label of whatever
+        object it was printing, so with that object excluded the
+        toolchanger's dock moves were dropped as 'inside the object': the
+        carriage never reached the dock and the release failed with E0138.
+        The same holds for PAUSE's park lift and everything done while
+        paused. Both run in the machine's frame, not the file's."""
+        if self.toolchange is not None and getattr(
+                self.toolchange, 'changing', False):
+            return True
+        return self.pause_resume is not None and getattr(
+            self.pause_resume, 'is_paused', False)
+
     def move(self, newpos, speed):
         self.last_speed = speed
-        if self._test_in_excluded_region():
+        if (self._test_in_excluded_region()
+                and not self._machine_owns_motion()):
             self._ignore_move(newpos, speed)
         else:
             self._normal_move(newpos, speed)
