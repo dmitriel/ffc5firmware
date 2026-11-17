@@ -103,6 +103,16 @@ for the next print.
 
 ---
 
+## Printing square to a tilted bed
+
+The mesh makes every layer follow the plate, but the layers still stack
+straight up. If the plate has tilted -- and it moves with temperature -- the
+part leans by the same angle. [Tilt correction](tilt-correction.md) tilts the
+whole print to stand square on the plate. It is optional;
+`TILT_CORRECTION_TOGGLE ENABLE=1` turns it on for the next print.
+
+---
+
 ## A mesh for each temperature
 
 A plate probed hot is a different shape from one probed cold, and on the

@@ -46,6 +46,13 @@ height, a warning says so. Travel slightly above the current layer
 the nozzle descends to the right height before it starts extruding; travel
 higher than that, a Z-hop, keeps the current layer's offset.
 
+WITH TILT CORRECTION. ff_tilt_correction rotates everything under bed_mesh
+onto the plate's fitted plane, frozen at the print start, and bed_mesh then
+holds the plate in that tilted frame (its height above the plane, along
+the normal). This transform, its layers and its mesh lookups are all in
+that frame already, so nothing here changes: it absorbs the plate relative
+to the plane, and the nozzle stays on the tilted plane, not machine Z.
+
 HOW IT SITS IN KLIPPER. bed_mesh keeps its mesh loaded and goes on adding
 it to every move, so ff_bed_guard, the screens and anything else that reads
 it see the real plate. This transform sits at the top of the chain, above

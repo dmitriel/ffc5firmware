@@ -16,6 +16,20 @@ both printer models or through every real-world workflow.
   has and swaps in the tool behind the paused number. Not yet tested on
   hardware. See [Remapping tools](docs/printing.md#remapping-tools).
 
+- Tilt correction: the print's coordinate frame is tilted to stand square on
+  the bed's fitted plane, so a plate whose tramming has moved with
+  temperature no longer makes the part lean. `START_PRINT` scans the file in
+  the background, fits a plane to the active mesh over the first-layer
+  footprint (least squares, equal weight per area), tilts the frame about the
+  footprint's centre -- the Z offset being the plane's height there -- and
+  freezes that frame for the whole print. The frame is applied last, under
+  bed mesh, so the bed mesh correction is rotated with it (applied along
+  the plate's normal), fade follows the print's own height, and the flow
+  mesh absorbs the plate relative to the tilted plane; a mesh cleared or
+  reloaded mid-print never changes the frame. If a tilted move
+  would go further outside the machine's travel than the file already does,
+  the tilt is reduced until none does. `TILT_CORRECTION_TOGGLE ENABLE=1`
+  uses it for the next print. Off by default and not yet tested on hardware. See [the tilt correction page](docs/tilt-correction.md).
 - Flow mesh, a second bed-mesh strategy: the nozzle stays on the flat sliced
   plane and the first layers absorb the plate's unevenness in their
   thickness, with extrusion scaled to match. A layer is never laid thinner
