@@ -254,6 +254,28 @@ def test_stopping_hands_back_a_consistent_e(fm):
     assert not obj.stop()
 
 
+def test_it_stops_from_under_exclude_object(fm):
+    # exclude_object installs over us at the first EXCLUDE_OBJECT and stays
+    # until the next file. END_PRINT's FLOW_MESH_STOP used to refuse here,
+    # and the error skipped the rest of the exit sequence.
+    obj, printer = started(fm, lambda x, y: 0.05)
+    line(obj, 0., 10., 0.2, 0., 1.)
+    exclude = SimpleNamespace(next_transform=obj)
+    printer.gcode_move.move_transform = exclude
+    assert obj.stop()
+    assert printer.gcode_move.move_transform is exclude
+    assert exclude.next_transform is printer.next
+    assert printer.gcode_move.base_position[3] == pytest.approx(-0.25)
+
+
+def test_it_still_refuses_when_it_cannot_find_itself(fm):
+    obj, printer = started(fm, lambda x, y: 0.05)
+    printer.gcode_move.move_transform = SimpleNamespace()   # hides the rest
+    with pytest.raises(RuntimeError, match="not found"):
+        obj.stop()
+    assert obj.active
+
+
 def test_it_refuses_without_a_mesh_or_with_fade(fm):
     printer = Printer(lambda x, y: 0., fade=True)
     obj = fm.FFFlowMesh(Config(printer))
