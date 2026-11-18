@@ -146,13 +146,6 @@ both printer models or through every real-world workflow.
   clean. New `PURGE=<mm>` sets the purge length from the slicer
   (`PURGE=0`: wipe only). With the first head mounted, `START_PRINT` then
   sends the file's own `T<n>` so AFC holds that lane as the one in use.
-- HelixScreen is updated to v1.2.0-beta.1-creator5 (upstream 1.2.0-beta.1).
-  It brings the upstream Creator 5 fixes from
-  [#38](https://github.com/Klipper4FlashForge/firmware/issues/38): its own
-  Creator 5 / 5 Pro printer image, correct print-history times, and no stale
-  temperatures or position after a Klipper restart. Also new: a tool-offset
-  step in the setup wizard and a filament panel organised by tool. A beta;
-  not yet run on a printer.
 - `START_PRINT` starts heating the bed before the first homing instead of after
   it, so the bed is closer to temperature when the nozzle clean ends.
 - XYZ tool calibration now verifies plate removal with two non-contact

@@ -22,7 +22,9 @@ young. Help and support: [the Discord](https://discord.gg/ggJyfgVA4v).
 
 This is a fork of [Reforge](https://github.com/Klipper4FlashForge/firmware),
 merged with Reforge's `master` as of `eda86c1` (AFC filament handling, tuned
-toolchange motion, HelixScreen 1.2 beta). Everything below is on top of what
+toolchange motion). HelixScreen stays on `v0.99.118-creator5`: Reforge's pin
+to `v1.2.0-beta.1-creator5` names a release that is not published yet, so
+nothing can build with it. Everything below is on top of what
 Reforge already changes from FlashForge's stock firmware; the packages on
 Reforge's Releases page do not carry it, so
 [build from this repository](docs/building.md) to get it. Items marked 🧪
