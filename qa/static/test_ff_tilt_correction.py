@@ -772,13 +772,23 @@ def test_the_tools_offsets_ride_outside_the_rotation(tc, tmp_path):
         [150., 100., 80.], abs=1e-6)
 
 
-def test_the_files_tool_numbers_go_through_assign_tool(tc, tmp_path):
-    """T0 in the file, remapped to the head in dock 2 (offsets 7, -3): the
-    footprint is fitted where THAT head prints, not where tool 0 would."""
+class _Lane:
+    def __init__(self, *maps):
+        self.maps = list(maps)
+
+    def get_status(self, eventtime):
+        return {'map': self.maps}
+
+
+def test_the_files_tool_numbers_go_through_the_afc_map(tc, tmp_path):
+    """T0 in the file, mapped by AFC to the head in dock 2 (offsets 7, -3):
+    the footprint is fitted where THAT head prints, not where tool 0 would."""
     obj, printer = make(tc, tmp_path, tilted)
-    numbers = {0: 1, 1: 0, 2: 2, 3: 3}          # file T0 -> physical tool 1
-    printer.objects["ff_toolchange"]._tool_for_number = numbers.get
-    printer.frame.tool = 1                       # T0 grabbed: tool 1 mounted
+    printer.objects["AFC_lane e0"] = _Lane()
+    printer.objects["AFC_lane e1"] = _Lane("T1", "T0")   # file T0 -> head 1
+    printer.objects["AFC_lane e2"] = _Lane("T2")
+    printer.objects["AFC_lane e3"] = _Lane("T3")
+    printer.frame.tool = 1                       # T0 grabbed: head 1 mounted
     obj.cmd_TILT_CORRECTION_START(Cmd())
     plain, _ = make(tc, tmp_path, tilted)
     plain.cmd_TILT_CORRECTION_START(Cmd())
