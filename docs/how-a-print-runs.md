@@ -1,9 +1,11 @@
 # How a print runs
 
-The mod is built so that **the same file prints on both firmwares**. A stock
-FlashForge Orca profile, untouched, and files you sliced before you flashed:
-they run here without a re-slice and without a line pasted into Machine start
-G-code.
+Reforge is built so that **the same file can print on both firmwares**. A
+stock FlashForge Orca profile, untouched, and files you sliced before you
+flashed can run without a re-slice and without a line pasted into Machine
+start G-code -- once you turn on the automatic preparation
+([below](#turn-on-the-automatic-preparation)). As shipped, this firmware
+leaves that off and expects Machine start G-code to call `START_PRINT`.
 
 That is not a coincidence, and it is worth understanding if you intend to
 change anything — because the reason it works is that something now does, in
@@ -59,10 +61,11 @@ Mainsail, HelixScreen, OrcaSlicer — anything that speaks Moonraker
         │   reads bed, nozzle, first tool and first-layer height from the file
         │
         ├─ FF_BEFORE_PRINT_START ─┬─► _FF_PREFLIGHT  calibration + tool gate
-        │                         └─► START_PRINT    the preparation sequence
+        │                         └─► START_PRINT    only with prepare: 1
         ▼
      Klipper streams the file
         │
+        ├─ START_PRINT ─────► from Machine start G-code (the shipped default)
         ├─ a bare `T2` ─────► ff_toolchange performs the change
         └─ PAUSE / RESUME / CANCEL_PRINT ─► macros in ff-print-macros.cfg
         │
@@ -88,24 +91,30 @@ wins, so the shipped defaults stay for everything you leave out, and your
 overrides survive every update. Never edit the `ff-*.cfg` files themselves —
 an update replaces them without asking.
 
-### Turn off the automatic preparation
+### Turn on the automatic preparation
 
-If your own profile already calls `START_PRINT`, or homes for itself:
+As shipped, `START_PRINT` runs only when the file calls it. To print files
+from a profile that does not -- FlashForge's stock Orca profile, or files
+sliced before you changed it -- have `[ff_print]` run it before the file's
+first line:
 
 ```ini
 [gcode_macro FF_BEFORE_PRINT_START]
-variable_prepare: 0
+variable_prepare: 1
 ```
 
+Leave it off for a profile that calls `START_PRINT` or homes for itself.
 Preparing twice misplaces nothing — the Z offset and `T<n>` are both
-idempotent — but it re-homes and re-purges every tool for no reason. A
-profile that runs its own `G28` **needs** this off: our `G28` docks a mounted
-tool before homing Z, so it would dock the tool preparation just grabbed and
-print with an empty carriage.
+idempotent — but it re-homes and re-purges every tool for no reason, and a
+profile that runs its own `G28` would have our `G28` dock the tool
+preparation just grabbed and print with an empty carriage.
 
 ### Drive the sequence from the slicer
 
-With `prepare: 0`, call it yourself from Machine start G-code:
+Call it from Machine start G-code. A complete Orca block, with the flow mesh
+and tilt correction turned on, is
+[`gcode/orca-machine-start-flow-tilt.gcode`](../gcode/orca-machine-start-flow-tilt.gcode).
+The short form:
 
 ```gcode
 START_PRINT TOOLS=0:220,2:240 BED=60 MESH=adaptive SOAK=300

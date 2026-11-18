@@ -10,7 +10,7 @@ with Klipper and a toolchanger-aware web and touchscreen experience.
 | Installation | FlashForge-style USB installer, one package per model, model guard | ✅ Yes |
 | Recovery | Matching stock package restores stock files | ✅ Yes |
 | Calibration import | Factory dock, station, nozzle, and bed data imported on first boot | ✅ Yes |
-| Printing | Stock slicer G-code, preparation, mesh, clean, tool checks, cancel/pause/resume | ✅ Yes |
+| Printing | Slicer G-code that calls `START_PRINT` (or stock G-code with `prepare: 1`), preparation, mesh, clean, tool checks, cancel/pause/resume | ✅ Yes |
 | Toolchanger | T0–T3 selection, docking/grabbing, mounted-tool detection, safe homing | ✅ Yes |
 | Bed collision guard | Refuses any move that would bring the nozzle or bare carriage within 0.1 mm of the bed, measured from where your Z offset puts it (a negative babystep is allowed down to 0.5 mm); `SET_BED_GUARD` | 🧪 Not yet on hardware |
 | Tool calibration | Per-tool offsets, station calibration, bounded probes, sanity checks | ✅ Yes |

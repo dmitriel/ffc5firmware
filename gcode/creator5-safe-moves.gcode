@@ -2,8 +2,8 @@
 ; Creator 5 / Creator 5 Pro -- safe first check
 ;
 ; The feature print with the heat and the filament taken out. Once the
-; machine is homed, no move in THIS FILE goes below Z50 (the implicit
-; prepare that runs before it does -- see the note at the end); nothing
+; machine is homed, no move in THIS FILE goes below Z50 (an implicit
+; prepare, if you turned it on, does -- see the note at the end); nothing
 ; extrudes, and no heater is ever given a target. It is the file to run
 ; FIRST on a freshly flashed machine, so that the expensive way to
 ; discover a wrong Z offset or a dock that does not latch is not a
@@ -44,16 +44,16 @@
 ;     one that is lying before you move anything.
 ;
 ; This file names no tool as a bare `Tn`, and carries no M104/M140, so
-; ff_print derives nothing from it and the implicit prepare has nothing
-; to heat or purge -- unlike the feature print, which wants prepare at 0.
+; ff_print derives nothing from it and an implicit prepare would have
+; nothing to heat or purge.
 ;
-; With prepare at 1 (the shipped default) the implicit START_PRINT still
-; runs G28, BED_MESH_PROFILE LOAD=MESH_DATA and `G1 Z10 F1200` before
-; this file's own first line. That Z10 is in the raw eddy frame, ~6.8 mm
-; physical. The G28 and the offset move before it also take Z well below
-; 50 -- homing is what drops you, as the opening note says. None of it
-; heats or extrudes. Set prepare to 0 if you want the Z50 floor to hold
-; from power-on to the last line.
+; With prepare at 0 (the shipped default) nothing runs before this
+; file's own first line. If you set it to 1, the implicit START_PRINT
+; runs G28, the mesh and `G1 Z10 F1200` first. That Z10 is in the raw
+; eddy frame, ~6.8 mm physical. The G28 and the offset move before it
+; also take Z well below 50 -- homing is what drops you, as the opening
+; note says. None of it heats or extrudes. Keep prepare at 0 if you want
+; the Z50 floor to hold from power-on to the last line.
 ; ====================================================================
 
 G90

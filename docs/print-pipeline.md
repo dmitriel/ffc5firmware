@@ -85,7 +85,8 @@ overridden as well.
 `FF_BEFORE_PRINT_START` always runs `_FF_PREFLIGHT` — the calibration and
 tool-presence gate raises before anything heats, homes or grabs, and there is
 no origin for which skipping it is right. It then runs `START_PRINT` if its
-`prepare` variable is 1, which is the shipped default.
+`prepare` variable is 1. The shipped default is 0: the slicer's Machine start
+G-code calls `START_PRINT` itself.
 
 `START_PRINT` follows the app's order, with the app's own addresses noted in
 the config beside each step: `_FF_PREFLIGHT` for every tool in `TOOLS=`, then

@@ -78,7 +78,7 @@ never forced to the limit on a flat spot; it keeps its own height there.
   slicer's first-layer height rather than lowering `min_thickness`.
 * **The first layer's height comes from the print start**, the `LAYER=`
   that `START_PRINT` already takes (filled in from the
-  file's first `;HEIGHT:` when the printer starts the print itself). If it is
+  file's first `;HEIGHT:` when `FF_BEFORE_PRINT_START`'s `prepare` is on). If it is
   missing, the print says so and uses the standard mesh. In a slicer's start
   G-code pass the *first* layer's height, e.g. Orca's
   `LAYER=[initial_layer_print_height]`. If the file's first extrusion is at

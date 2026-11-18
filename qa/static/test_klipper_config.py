@@ -753,6 +753,15 @@ def test_adaptive_mesh_is_retired_to_a_harmless_message(model):
 
 
 @pytest.mark.parametrize("model", MODELS)
+def test_print_start_is_not_implicit_by_default(model):
+    """START_PRINT runs only when the file (or the user) calls it."""
+    cp = _parse(model)
+    sec = "gcode_macro FF_BEFORE_PRINT_START"
+    assert cp.get(sec, "variable_prepare").strip() == "0"
+    assert cp.get(sec, "variable_prepare_on_m23").strip() == "0"
+
+
+@pytest.mark.parametrize("model", MODELS)
 def test_no_mesh_toggles_or_defer_are_left(model):
     cp = _parse(model)
     for gone in ("gcode_macro ADAPTIVE_MESH_TOGGLE",

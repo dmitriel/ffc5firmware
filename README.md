@@ -18,6 +18,60 @@ young. Help and support: [the Discord](https://discord.gg/ggJyfgVA4v).
 
 ---
 
+## What this fork adds
+
+This is a fork of [Reforge](https://github.com/Klipper4FlashForge/firmware).
+Everything below is on top of what Reforge already changes from FlashForge's
+stock firmware; the packages on Reforge's Releases page do not carry it, so
+[build from this repository](docs/building.md) to get it. Items marked 🧪
+are replica- and unit-tested but **not yet tested on hardware**.
+
+| | Stock FlashForge | Reforge | This fork |
+|---|---|---|---|
+| Print start | The touchscreen app prepares every print | `START_PRINT` runs automatically before every file | **Runs only when called** — from Machine start G-code ([ready block](gcode/orca-machine-start-flow-tilt.gcode)) or by you |
+| Bed mesh choice | Fixed saved mesh | Fixed or adaptive | **`BED_MESH_MODE auto\|off\|fixed\|adaptive\|thermal`**, adaptive mesh built into `START_PRINT` |
+| Thermal mesh map | — | — | 🧪 **Sweep** bed × chamber temperatures, then probe 4 points per print to load the matching mesh ([page](docs/thermal-mesh.md)) |
+| Flow mesh | — | — | 🧪 Nozzle stays on the flat sliced plane; the first layers **absorb the plate in their thickness**, extrusion scaled to match ([page](docs/flow-mesh.md)) |
+| Tilt correction | — | — | 🧪 The print's frame is **tilted onto the bed's fitted plane**, so a plate whose tramming moved with heat no longer makes parts lean ([page](docs/tilt-correction.md)) |
+| Bed-collision guard | — | — | 🧪 Any move that would bring the nozzle or bare carriage within 0.1 mm of the plate is refused (`SET_BED_GUARD`) |
+| Tool remapping | Not comparable (FlashForge's app UI) | HelixScreen's remap is refused by the printer | 🧪 `ASSIGN_TOOL TOOL=T2 N=0`, before or during a print; HelixScreen's tool mapping works |
+| Pre-print clean | Every used tool cleaned and docked, then the first grabbed | Same as stock | Tools preheat to −100 °C beside the bed; the **first tool is cleaned last**, hot, and left mounted and primed; `PURGE=<mm>` |
+| Mesh probing speed | 3 touches per point, 200 mm/s travel | 3 touches, 2 mm lift between points | 2 touches (3rd only on disagreement), 500 mm/s travel, minimal lift between points |
+| Exclude object | n/a | Toolchange could fail (`E0138`) after excluding the object holding the prime tower | Toolchange and pause moves are never excluded |
+| "Timer too close" mid-print | n/a | Possible after a toolchange followed by many tiny moves | 🧪 File reader yields to Klipper every 20 ms |
+| Resume after a purge/load in a pause | n/a | Diagonal move back could hit a docked tool | Backs out of the dock bay, lifts, crosses, then descends |
+
+### Starting a print on this fork
+
+Because the print start is no longer implicit, **a file must call
+`START_PRINT` itself**. Paste
+[`gcode/orca-machine-start-flow-tilt.gcode`](gcode/orca-machine-start-flow-tilt.gcode)
+into OrcaSlicer's *Printer settings → Machine G-code → Machine start G-code*:
+it turns on the flow mesh and tilt correction, heats the chamber, and runs
+`START_PRINT` with every tool the file uses. The core of it:
+
+```gcode
+M141 S{chamber_temperature[initial_extruder]}
+FLOW_MESH_TOGGLE ENABLE=1
+TILT_CORRECTION_TOGGLE ENABLE=1
+START_PRINT BED=[bed_temperature_initial_layer_single] TOOL=[initial_extruder] NOZZLE={nozzle_temperature_initial_layer[initial_extruder]} LAYER=[initial_layer_print_height] TOOLS={if is_extruder_used[0]}0:{nozzle_temperature_initial_layer[0]},{endif}{if is_extruder_used[1]}1:{nozzle_temperature_initial_layer[1]},{endif}{if is_extruder_used[2]}2:{nozzle_temperature_initial_layer[2]},{endif}{if is_extruder_used[3]}3:{nozzle_temperature_initial_layer[3]},{endif}
+```
+
+A file from FlashForge's untouched profile now stops at its first move with
+"Must home axis first" — nothing moves before that. To print such files
+unchanged, as upstream Reforge does, add this at the end of `printer.cfg`:
+
+```ini
+[gcode_macro FF_BEFORE_PRINT_START]
+variable_prepare: 1
+```
+
+The calibration and tool-presence gate before a print, and the exit sequence
+after it, run either way. Details: [Printing](docs/printing.md#slicer-setup)
+and [How a print runs](docs/how-a-print-runs.md).
+
+---
+
 ## Status
 
 **It runs on real printers** — both a Creator 5 Pro and a Creator 5 have been
@@ -32,7 +86,9 @@ A checked box happened on that machine; an empty one has not, yet.
 - [x] **Install and migration from stock firmware** — the printer's own
   updater does it; your unit's factory calibration imports itself on the
   first boot
-- [x] **Printing** — gcode straight from the slicer, nothing edited
+- [x] **Printing** — gcode straight from the slicer (on this fork, with a
+  Machine start G-code that calls `START_PRINT`; see
+  [above](#starting-a-print-on-this-fork))
 - [x] **Toolchanges** — a current Klipper with real toolchanger support, in
   place of the 0.12-era tree FlashForge ships
 - [x] **Nozzle-offset calibration**
