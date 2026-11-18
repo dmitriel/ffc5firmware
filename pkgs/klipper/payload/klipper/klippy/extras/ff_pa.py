@@ -85,7 +85,7 @@ SWEEP_SCV = 9.0            # SET_VELOCITY_LIMIT SQUARE_CORNER_VELOCITY=9
 ACTION_START = 11          # the firmware tests == 11 for start ...
 ACTION_STOP = 0            # ... and treats everything else as stop
 ACTION_PC = 666            # the app's "material" code; inert on this eBoard
-LINE_Z = 8.0               # RAW eddy frame, == _FF_FILAMENT's purge_z
+LINE_Z = 8.0               # G-code Z, == _FF_FILAMENT's purge_z
 LINE_Z_FEED = 3000
 # The purge chute, and the staging X the app approaches it from. Defaults
 # only: when [gcode_macro _FF_FILAMENT] is present its purge_x/purge_y and
@@ -344,8 +344,7 @@ class FFPA:
             return
         raise gcmd.error(
             "%s: %s is at %.1f C and will not extrude (min_extrude_temp)."
-            " Heat it -- SET_TOOL_TEMPERATURE T=<tool> TARGET=<temp>"
-            " WAIT=1 -- or pass TEMP=."
+            " Heat it -- M109 S<temp> T<tool> -- or pass TEMP=."
             % (self.name, extruder.get_name(), status.get('temperature', 0.)))
 
     def _check_filament(self, gcmd, tool):
@@ -389,19 +388,18 @@ class FFPA:
                     " y_start/y_step."
                     % (self.name, axis, min(values), max(values), lo, hi))
 
-    def _where_note(self, tool, raw_z, z_target):
+    def _where_note(self, tool, z_target):
         """Say plainly where the gram of filament is going to end up."""
         if not self.park:
             return ("  ! PARK=0: the drivers are latched where the nozzle"
                     " already stands, so the whole ~1 g lands THERE, at Z"
-                    " %.3f raw / %.3f gcode. Nothing will move it aside."
-                    % (raw_z, z_target))
+                    " %.3f. Nothing will move it aside." % z_target)
         x, y, _xf, _yf, _af = self._chute(tool)
         return ("  the carriage parks over the purge chute at X%.1f Y%.1f,"
-                " Z %.3f raw / %.3f gcode, and STAYS THERE: the X/Y drivers"
+                " Z %.3f, and STAYS THERE: the X/Y drivers"
                 " are latched off for the sweep, so the ladder is timing"
                 " only and the ~1 g goes down the chute."
-                % (x, y, raw_z, z_target))
+                % (x, y, z_target))
 
     def _cross_section_note(self, extruder):
         """Klipper caps extrude cross-section at 4*nozzle^2. The sweep's
@@ -422,34 +420,21 @@ class FFPA:
                 % (area, cap, nozzle))
 
     def _line_z(self, gcmd, tool):
-        """8 mm above the plate in the RAW eddy frame -> a G-code Z.
+        """The line height: 8 mm above the plate, as G-code Z.
 
-        Three layers sit between a G-code Z and the machine with a tool
-        mounted, and all three come off: the operator's babystep, the tool's
-        own frame, and the job term that frame also carries. Subtracting only
-        the first parks the nozzle ~3.2 mm high -- see _FF_NOZZLE_WIPE in
-        ff-filament.cfg, where that was a real bug. Here it only changes how
-        far the extrudate falls, so it is comfort rather than crash, but the
-        arithmetic is the same and there is no reason to get it wrong."""
-        raw = self.line_z
-        if raw is None:
+        Same frame as [gcode_macro _FF_FILAMENT] purge_z: the app's
+        probeZ + 8 is a bed-frame height, and with the tool mounted its
+        offsets already put the nozzle tip in that frame, so the number is
+        used as it stands."""
+        z = self.line_z
+        if z is None:
             ff = self.printer.lookup_object('gcode_macro _FF_FILAMENT', None)
             if ff is not None:
-                raw = ff.get_status(
+                z = ff.get_status(
                     self.reactor.monotonic()).get('purge_z', LINE_Z)
             else:
-                raw = LINE_Z
-        raw = gcmd.get_float('Z', raw)
-        now = self.reactor.monotonic()
-        gcode_move = self.printer.lookup_object('gcode_move')
-        z = raw - gcode_move.get_status(now)['homing_origin'].z
-        tool_view = self.printer.lookup_object('tool T%d' % tool, None)
-        if tool_view is not None:
-            z -= tool_view.get_status(now).get('gcode_z_offset', 0.)
-        changer = self.printer.lookup_object('toolchanger', None)
-        if changer is not None:
-            z -= changer.get_status(now).get('print_z_offset', 0.)
-        return raw, z
+                z = LINE_Z
+        return gcmd.get_float('Z', z)
 
     # ---------------- the sweep ----------------
 
@@ -515,9 +500,12 @@ class FFPA:
         self._run('SET_VELOCITY_LIMIT SQUARE_CORNER_VELOCITY=%.3f'
                   % self.sweep_scv)
         # Raise before travelling, never lower -- same rule as the purge in
-        # ff-filament.cfg.
-        _toolhead, status = self._toolhead_status()
-        if self.dry_run or status['position'].z < z_target:
+        # ff-filament.cfg, and compared in the same G-code frame the G1 uses
+        # (toolhead.position is raw and reads ~3 mm higher with a tool on).
+        gcode_move = self.printer.lookup_object('gcode_move')
+        gcode_z = gcode_move.get_status(
+            self.reactor.monotonic())['gcode_position'].z
+        if self.dry_run or gcode_z < z_target:
             self._run('G1 Z%.3f F%d' % (z_target, self.line_z_feed))
             self._wait_moves()
         parked = self._park(tool)
@@ -746,7 +734,7 @@ class FFPA:
                 pass
         self.parked_at = None
 
-    def _heat(self, gcmd, tool, extruder):
+    def _heat(self, gcmd, extruder):
         """Heat for TEMP= and return the target to put back afterwards.
 
         None when TEMP= was not given: a heater the operator set by hand is
@@ -758,20 +746,21 @@ class FFPA:
         if temp is None:
             return None
         prev = extruder.get_status(self.reactor.monotonic()).get('target', 0.)
-        # By physical tool: M104 T<n> means a print file's tool NUMBER,
-        # which ASSIGN_TOOL can point at another tool.
-        self._run('SET_TOOL_TEMPERATURE T=%d TARGET=%.1f' % (tool, temp))
+        # By heater name: M104 T<n> is AFC's (ff-afc.cfg) and heats whichever
+        # head T<n> is mapped to, not physical tool n.
+        self._run('SET_HEATER_TEMPERATURE HEATER=%s TARGET=%.1f'
+                  % (extruder.get_name(), temp))
         self._run('TEMPERATURE_WAIT SENSOR=%s MINIMUM=%.1f MAXIMUM=%.1f'
                   % (extruder.get_name(), temp - self.min_temp_margin,
                      temp + self.min_temp_margin))
         return prev
 
-    def _restore_heat(self, tool, prev_target):
+    def _restore_heat(self, extruder, prev_target):
         if prev_target is None:
             return
         try:
-            self._run('SET_TOOL_TEMPERATURE T=%d TARGET=%.1f'
-                      % (tool, prev_target))
+            self._run('SET_HEATER_TEMPERATURE HEATER=%s TARGET=%.1f'
+                      % (extruder.get_name(), prev_target))
         except self.printer.command_error:
             pass
 
@@ -837,24 +826,24 @@ class FFPA:
         self._check_bounds(gcmd, tool)
         self._ensure_extruder(tool)
         extruder = self._extruder()
-        prev_target = self._heat(gcmd, tool, extruder)
+        prev_target = self._heat(gcmd, extruder)
         # From here every exit -- success, a failed sweep, a mid-run error --
         # must put the heater target back, or TEMP= leaves the hotend on.
         try:
             self._calibrate_heated(gcmd, verbose, tool)
         finally:
-            self._restore_heat(tool, prev_target)
+            self._restore_heat(extruder, prev_target)
 
     def _calibrate_heated(self, gcmd, verbose, tool):
         extruder = self._extruder()
         if not self.dry_run:
             self._check_can_extrude(gcmd, extruder)
-        raw_z, z_target = self._line_z(gcmd, tool)
+        z_target = self._line_z(gcmd, tool)
 
         lines = ["%s: T%d (%s), %d candidates x up to %d sweeps"
                  % (self.name, tool, extruder.get_name(),
                     len(self.candidates), self.sweeps),
-                 self._where_note(tool, raw_z, z_target)]
+                 self._where_note(tool, z_target)]
         note = self._cross_section_note(extruder)
         if note:
             lines.append(note)
@@ -971,19 +960,19 @@ class FFPA:
         self._check_bounds(gcmd, tool)
         self._ensure_extruder(tool)
         extruder = self._extruder()
-        prev_target = self._heat(gcmd, tool, extruder)
+        prev_target = self._heat(gcmd, extruder)
         try:
             self._probe_heated(gcmd, y, pa_text, tool)
         finally:
-            self._restore_heat(tool, prev_target)
+            self._restore_heat(extruder, prev_target)
 
     def _probe_heated(self, gcmd, y, pa_text, tool):
         extruder = self._extruder()
         if not self.dry_run:
             self._check_can_extrude(gcmd, extruder)
-        raw_z, z_target = self._line_z(gcmd, tool)
+        z_target = self._line_z(gcmd, tool)
         extruder_name = extruder.get_name()
-        gcmd.respond_info(self._where_note(tool, raw_z, z_target))
+        gcmd.respond_info(self._where_note(tool, z_target))
         # One line at the requested Y: index 0 with the ladder rebased.
         saved_y = self.y_start
         with self._guarded(extruder):

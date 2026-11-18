@@ -735,6 +735,25 @@ class FFTiltCorrection:
         return tuple(env_min), tuple(env_max)
 
     # -- printer state --------------------------------------------------------
+    def _head_for_number(self, number):
+        """AFC's map: the head whose lane (e<n>) answers to T<number>.
+        Identity without AFC, or for a number no lane is mapped to."""
+        eventtime = self.reactor.monotonic()
+        for head in range(4):
+            lane = self.printer.lookup_object('AFC_lane e%d' % head, None)
+            if lane is None:
+                continue
+            try:
+                status = lane.get_status(eventtime)
+            except Exception:
+                continue
+            maps = status.get('map')
+            if isinstance(maps, str):
+                maps = [maps]
+            if ('T%d' % number) in (maps or []):
+                return head
+        return number
+
     def _toolchange(self):
         return self.printer.lookup_object('ff_toolchange', None)
 
@@ -920,21 +939,16 @@ class FFTiltCorrection:
         gcode_move = self.printer.lookup_object('gcode_move')
         babystep = list(gcode_move.homing_position[:3])
 
-        toolchange = self._toolchange()
 
         def resolve(number):
             """The scan keys moves by the file's tool NUMBER (its bare T<n>);
-            offsets belong to the PHYSICAL tool that number selects, which
-            ASSIGN_TOOL can change. Moves before the first T<n> run on the
-            tool mounted now. A number with no tool cannot print anyway;
-            its moves are placed with the mounted tool's offsets."""
+            offsets belong to the PHYSICAL head that number selects, which
+            AFC's map (SET_MAP) can change: the head of the lane mapped to
+            T<n>, lane e<n> being head n. Moves before the first T<n> run on
+            the tool mounted now."""
             if number is None:
                 return initial
-            lookup = getattr(toolchange, '_tool_for_number', None)
-            if lookup is None:
-                return number
-            tool = lookup(number)
-            return initial if tool is None else tool
+            return self._head_for_number(number)
 
         # The footprint, in toolhead coordinates, one point per cell.
         cells = set()

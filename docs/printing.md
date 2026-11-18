@@ -48,7 +48,7 @@ the file uses with its clean temperature (Orca: `is_extruder_used[n]`; a bare
 `TOOLS=0,2` also works and falls back to `NOZZLE=`) — presence gate and
 pre-print
 nozzle clean; without explicit temperatures each tool is cleaned at the
-temperature its `_FF_FILAMENT.tool_material` maps to; `CLEAN=0` skips the clean (default on: each used tool is grabbed,
+temperature AFC records for its head, else `NOZZLE=`; `CLEAN=0` skips the clean (default on: each used tool is grabbed,
 heated, purged 50 mm at the chute with the part fan on, wiped at the
 station, cooled by 100 °C and docked while the bed heats — the app's
 `clearNozzlePrint`); `MESH=adaptive` probes a fresh mesh over the print
@@ -77,10 +77,10 @@ cooperate.
   before anything heats, homes or grabs, with the fix spelled out. Override
   only for bench tests:
   `SET_GCODE_VARIABLE MACRO=_FF_JOB VARIABLE=allow_uncalibrated VALUE=1`.
-* **Calibration moves are bounded.** The plate check gates both
-  calibration commands; the Z probe targets −3 by default (the app's own
-  station value) and, once a trigger height is known, stops 2 mm below it
-  instead of driving on.
+* **Calibration moves are bounded.** Before the under-bed station is
+  approached, the normal carriage probe must see its area at least 0.8 mm
+  below an interior bed point. The station Z probe targets −3 by default and,
+  once a trigger height is known, stops 2 mm below it instead of driving on.
 * **Implausible results are not saved.** A circle-fit residual above
   0.05 mm, or a nozzle-to-station gap (`nozzle_z − station_z`) outside
   1.5–5 mm, aborts the command with nothing staged. Thresholds are in
@@ -122,13 +122,9 @@ PURGE TOOL=1 PURGE_TEMP=220 LENGTH=50  ; app's clearNozzlePrint purge + cold wip
   and tears off instead of riding back to the dock. `WIPE=0` skips it.
   `LOAD_FILAMENT` has no wipe, as in the app (its guide tells you to pull
   the string off).
-* While a print is **paused** the macros only act on the mounted tool — or
-  on the tool the print will resume with, if you have
-  [remapped](#remapping-tools) its tool number since — use the app's
-  in-print lengths (100 mm then −5), and leave tool and heater for
+* While a print is **paused** the macros only act on the mounted tool, use
+  the app's in-print lengths (100 mm then −5), and leave tool and heater for
   `RESUME`. While **printing** they refuse.
-* `TOOL=` is always the physical tool: `TOOL=2` is the head in the third
-  dock, whatever `ASSIGN_TOOL` says.
 * The stock app has **no retract-unload** — its "unload" is the same forward
   push and the on-screen guide tells you to cut and pull. `UNLOAD_FILAMENT`
   is therefore designed, not ported; `unload_length` (80 mm) in
@@ -141,38 +137,10 @@ PURGE TOOL=1 PURGE_TEMP=220 LENGTH=50  ; app's clearNozzlePrint purge + cold wip
 
 ## Remapping tools
 
-A sliced file asks for tools by number: `T0`, `T1`, and `M104 … T1` to heat
-one. `ASSIGN_TOOL` decides which physical tool each number picks up, so you
-can print a file on different tools than it was sliced for, or carry on with
-another tool when one runs out — the same command, and the same rules, as
-klipper-toolchanger's:
-
-```
-ASSIGN_TOOL TOOL=T2 N=0     ; the file's T0 now uses the head in dock 3
-ASSIGN_TOOL RESET=1         ; every tool its own number again
-TOOLCHANGE_STATUS           ; shows the current map
-```
-
-* The tool you assign gives up its old number, and the tool that had the
-  number is left with none. After the example above, a file that also uses
-  `T2` is refused until you assign `T2` somewhere too.
-* HelixScreen's tool mapping (a slot's edit screen, the pre-print screen)
-  sends exactly these commands, so its screen and the printer agree.
-* **Before a print:** `START_PRINT` prepares, cleans and calibrates the tools
-  the file's numbers now select, with the temperatures the file gives those
-  numbers.
-* **While paused** (out of filament, say): remap, load or purge the new tool
-  if you want, then `RESUME`. Each tool is reheated to the temperature its
-  *number* had when the print paused, the tool now behind the paused number
-  is swapped onto the carriage, and the print carries on with it from where
-  it stopped, at that tool's own offsets.
-* **While printing:** the change takes effect at the file's next tool
-  change, and the new tool is heated only by the file's own `M104`/`M109`
-  for that number. Pausing first is safer.
-* The map is not saved: a restart puts every tool back on its own number.
-  Commands that name a tool directly — `SELECT_TOOL`, `UNSELECT_TOOL`,
-  `SET_TOOL_TEMPERATURE`, the filament and calibration commands — always
-  mean the physical tool.
+Which head prints each of the file's `T0`–`T3` is AFC's map: `SET_MAP
+LANE=e2 MAP=T0` prints the file's `T0` on the third head, and
+`START_PRINT`'s tool check, nozzle clean and tilt correction follow it.
+[Filament and spools](filament-and-spools.md) has the details.
 
 ## Runout and clogs
 
@@ -182,9 +150,9 @@ touchscreen app did the rest (polled the mounted channel's switch sensor
 from its print loop, kept only the mounted tool's motion sensor enabled).
 Without the app nothing would happen. `payload/klipper/config/ff-runout.cfg` restates the
 sensor sections (Klipper merges repeated sections, later options win — the
-stock `printer.filament.cfg` stays untouched and OTA-safe) so that
-`runout_gcode` calls `_FF_RUNOUT`, and `ff_toolchange` arms the mounted
-tool's two sensors on every grab, disarms everything on release, and
+stock `printer.filament.cfg` stays untouched and OTA-safe) so that the motion
+sensors' `runout_gcode` calls `_FF_RUNOUT`, and `ff_toolchange` arms the
+mounted tool's motion sensor on every grab, disarms everything on release, and
 re-arms on `RESUME` (the app's `setFilamentWheelManager`).
 
 Flow: sensor fires while an SD print is running and the sensor belongs to
@@ -203,6 +171,7 @@ here), so the head still holds that much printable filament when the print
 stops — it is lost. Printing on and pausing once that length has been
 extruded is a real improvement, but it needs a per-machine measurement and
 a watcher counting extrusion; it is not built in.
-No endless-spool: another tool is another head, not another spool of the
-same material. Untested on hardware: whether the motion sensors
+The presence switches are AFC's (`ff-afc.cfg`): a runout there swaps to the
+head `SET_RUNOUT` names, or pauses. See
+[Filament and spools](filament-and-spools.md). Untested on hardware: whether the motion sensors
 (`detection_length 50`, `event_delay 3`) stay quiet through `LOAD_FILAMENT`.

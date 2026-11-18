@@ -8,14 +8,6 @@ both printer models or through every real-world workflow.
 
 ### Added
 
-- Tool remapping, before or during a print: `ASSIGN_TOOL TOOL=T2 N=0` makes
-  the file's `T0` -- its tool changes, its `M104`/`M109 T0` and
-  `START_PRINT`'s tool list -- use the head in dock 3, with
-  klipper-toolchanger's rules, so HelixScreen's tool mapping works. While
-  paused, `RESUME` heats each tool to the temperature of the number it now
-  has and swaps in the tool behind the paused number. Not yet tested on
-  hardware. See [Remapping tools](docs/printing.md#remapping-tools).
-
 - Tilt correction: the print's coordinate frame is tilted to stand square on
   the bed's fitted plane, so a plate whose tramming has moved with
   temperature no longer makes the part lean. `START_PRINT` scans the file in
@@ -113,14 +105,23 @@ both printer models or through every real-world workflow.
   the mesh.)
 - `printer.ff_print` reports the active plate's prime tower: position, size,
   brim, rotation and measured outline.
-- Gentler return to the print after a tool change, for a printer that restores
-  X/Y (`restore_axis`): `restore_z_hop` raises the old tool before it crosses the
-  part and the new one travels back high, `restore_retract` pulls filament back
-  while the new tool is still seated in its dock so it does not string, and
-  `restore_unretract` gives part of it back at the target. All are zero as
-  shipped, which changes nothing. From
-  [#29](https://github.com/Klipper4FlashForge/firmware/pull/29), without its
-  prime-tower handling.
+- AFC (the AFC-Klipper-Add-On) runs over the toolchanger, one lane per head.
+  `SET_MAP` prints any slicer tool number on any head and is remembered across
+  restarts; `SET_RUNOUT` names a backup head that takes over when a spool runs
+  out mid-print; `SET_SPOOL_ID` gives each head its own Spoolman spool, made
+  active whenever that head is picked up. Mainsail's AFC panel and
+  HelixScreen's AFC backend drive all three. Installs and loads in the
+  replica; not yet run on a printer. See
+  [Filament and spools](docs/filament-and-spools.md).
+- Gentler return to the print after a tool change: `[AFC] z_hop` lifts the
+  old head before it leaves the print and brings the new one back at that
+  height, `[ff_toolchange] dock_retract` pulls filament back while the new head
+  is still seated in its dock so it does not string, and `dock_unretract`
+  gives part of it back once AFC has put the head over the print. All zero as
+  shipped, which changes nothing. The Z-hop and in-dock retract came from
+  [#29](https://github.com/Klipper4FlashForge/firmware/pull/29) as
+  `restore_z_hop`/`restore_retract`; under AFC they keep their effect under
+  these names.
 
 ### Changed
 
@@ -143,12 +144,66 @@ both printer models or through every real-world workflow.
   temperature, primed, so the print starts without reheating. The
   separate grab step is gone; the print Z offset is set just before that last
   clean. New `PURGE=<mm>` sets the purge length from the slicer
-  (`PURGE=0`: wipe only).
+  (`PURGE=0`: wipe only). With the first head mounted, `START_PRINT` then
+  sends the file's own `T<n>` so AFC holds that lane as the one in use.
+- HelixScreen is updated to v1.2.0-beta.1-creator5 (upstream 1.2.0-beta.1).
+  It brings the upstream Creator 5 fixes from
+  [#38](https://github.com/Klipper4FlashForge/firmware/issues/38): its own
+  Creator 5 / 5 Pro printer image, correct print-history times, and no stale
+  temperatures or position after a Klipper restart. Also new: a tool-offset
+  step in the setup wizard and a filament panel organised by tool. A beta;
+  not yet run on a printer.
 - `START_PRINT` starts heating the bed before the first homing instead of after
   it, so the bed is closer to temperature when the nozzle clean ends.
+- XYZ tool calibration now verifies plate removal with two non-contact
+  carriage-probe readings before approaching the under-bed station, performs
+  that check only once per run, and measures each nozzle at 200 C. Use
+  `CALIBRATE_TOOL_OFFSETS TOOL=<n>` for a station plus one-tool run; `TEMP=`
+  overrides the calibration temperature.
+- AFC is updated to its 2026-09-16 DEV revision and multiple mapping is
+  enabled: several slicer T-numbers can now select the same physical head.
+  AFC now performs its own Moonraker writes off Klipper's reactor, replacing
+  this firmware's `ff_afc` compatibility hook.
+- `T0`..`T3` and `M104`/`M109 T<n>` follow AFC's map. The print-start tool
+  check, calibration check and nozzle clean act on the heads the map picks.
+  `SELECT_TOOL T=<n>` still selects a head by its own number.
+- Filament load, unload and the pre-print nozzle clean take a head's
+  temperature from AFC's record of what is in it (its own temperature, else
+  the material table by its material). The fixed `tool_material` list is
+  gone; with no material recorded the clean falls back to the print's
+  `NOZZLE=` temperature instead of assuming PLA. AFC heats from the same
+  material table.
+- The presence switches' runout now belongs to AFC: a backup head, or a
+  pause. Clogs still pause through the motion sensors as before.
+
+### Removed
+
+- `INITIALIZE_TOOLCHANGER`, `SET_TOOL_TEMPERATURE`, `VERIFY_TOOL_DETECTED`,
+  `SELECT_TOOL_ERROR`, `ASSIGN_TOOL`, `TOOLCHANGE INDEX=`, the
+  `RESTORE_AXIS=` parameter and `[ff_toolchange] restore_axis`/`restore_*`
+  (see `z_hop` and `dock_retract` above). Nothing sends them with AFC present;
+  `SELECT_TOOL T=<n>` on the mounted head replaces `INITIALIZE_TOOLCHANGER`
+  as the recovery after an aborted change.
 
 ### Fixed
 
+- A toolchange no longer returns to the print with the new head still
+  heating. AFC moved the head back over the part as soon as it had grabbed the
+  new head, so the nozzle reached temperature above the model and left blobs
+  on it. The head now waits at the dock exit for the temperature the file
+  already set, then returns. See the upstream report,
+  [AFC-Klipper-Add-On #872](https://github.com/AFCProject/AFC-Klipper-Add-On/issues/872).
+- The factory XYZ calibration import marker now lives in persistent
+  `/usr/data/anvil-data` state, so reinstalling firmware does not reconsider
+  or repeat the stock-JSON import. Upgrading migrates the marker from its old
+  location before the payload tree is wiped.
+- An AFC toolchange (`T0`..`T3`) no longer shuts the printer down with
+  "Timer too close" right after the grab. AFC wrote its statistics to
+  Moonraker with blocking requests while the moves back to the print were
+  queued; the updated AFC runs those writes on its background thread.
+- HelixScreen's tool remap sent `ASSIGN_TOOL`, which this firmware refuses.
+  With AFC present HelixScreen runs its AFC backend, which remaps through
+  `SET_MAP` instead. Not yet confirmed on a printer.
 - Excluding an object no longer makes the next tool change fail. Orca puts
   the prime tower, and the `T<n>` before it, inside the label of the object
   it was printing; with that object excluded, the toolchanger's own moves to
@@ -206,9 +261,6 @@ both printer models or through every real-world workflow.
   the carriage and skipped picking it up again, so it travelled to the purge
   chute and fed filament with no tool on. It now picks the tool back up after
   homing.
-- HelixScreen no longer shows the wrong tool as active after you remap a
-  tool there. It kept its remap even though the printer refused it; the
-  printer now carries the remap out (see Added).
 - `RESUME` after a `PURGE`, `LOAD_FILAMENT` or `UNLOAD_FILAMENT` during a
   pause no longer drives the mounted tool into a docked one. Those macros
   leave the head at the purge chute or the wipe spot, beside the docks, and

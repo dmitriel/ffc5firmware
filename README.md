@@ -20,9 +20,11 @@ young. Help and support: [the Discord](https://discord.gg/ggJyfgVA4v).
 
 ## What this fork adds
 
-This is a fork of [Reforge](https://github.com/Klipper4FlashForge/firmware).
-Everything below is on top of what Reforge already changes from FlashForge's
-stock firmware; the packages on Reforge's Releases page do not carry it, so
+This is a fork of [Reforge](https://github.com/Klipper4FlashForge/firmware),
+merged with Reforge's `master` as of `eda86c1` (AFC filament handling, tuned
+toolchange motion, HelixScreen 1.2 beta). Everything below is on top of what
+Reforge already changes from FlashForge's stock firmware; the packages on
+Reforge's Releases page do not carry it, so
 [build from this repository](docs/building.md) to get it. Items marked 🧪
 are replica- and unit-tested but **not yet tested on hardware**.
 
@@ -34,8 +36,8 @@ are replica- and unit-tested but **not yet tested on hardware**.
 | Flow mesh | — | — | 🧪 Nozzle stays on the flat sliced plane; the first layers **absorb the plate in their thickness**, extrusion scaled to match ([page](docs/flow-mesh.md)) |
 | Tilt correction | — | — | 🧪 The print's frame is **tilted onto the bed's fitted plane**, so a plate whose tramming moved with heat no longer makes parts lean ([page](docs/tilt-correction.md)) |
 | Bed-collision guard | — | — | 🧪 Any move that would bring the nozzle or bare carriage within 0.1 mm of the plate is refused (`SET_BED_GUARD`) |
-| Tool remapping | Not comparable (FlashForge's app UI) | HelixScreen's remap is refused by the printer | 🧪 `ASSIGN_TOOL TOOL=T2 N=0`, before or during a print; HelixScreen's tool mapping works |
-| Pre-print clean | Every used tool cleaned and docked, then the first grabbed | Same as stock | Tools preheat to −100 °C beside the bed; the **first tool is cleaned last**, hot, and left mounted and primed; `PURGE=<mm>` |
+| Tool remapping | Not comparable (FlashForge's app UI) | 🧪 AFC's `SET_MAP`, infinite spool and Spoolman ([page](docs/filament-and-spools.md)) | Same AFC map; the tilt fit also follows it, using the mapped head's offsets |
+| Pre-print clean | Every used tool cleaned and docked, then the first grabbed | Every used head cleaned at its AFC lane's temperature and docked, then the first grabbed through AFC | Heads preheat to −100 °C beside the bed; the **first head is cleaned last**, hot, and left mounted and primed, then handed to AFC; `PURGE=<mm>` |
 | Mesh probing speed | 3 touches per point, 200 mm/s travel | 3 touches, 2 mm lift between points | 2 touches (3rd only on disagreement), 500 mm/s travel, minimal lift between points |
 | Exclude object | n/a | Toolchange could fail (`E0138`) after excluding the object holding the prime tower | Toolchange and pause moves are never excluded |
 | "Timer too close" mid-print | n/a | Possible after a toolchange followed by many tiny moves | 🧪 File reader yields to Klipper every 20 ms |
