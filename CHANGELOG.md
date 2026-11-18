@@ -124,6 +124,17 @@ both printer models or through every real-world workflow.
 
 ### Changed
 
+- **`START_PRINT` no longer runs unless something calls it.**
+  `FF_BEFORE_PRINT_START`'s `prepare` now defaults to 0: `[ff_print]` still
+  runs the calibration and tool gate before a file and the exit sequence
+  after it, but homing, cleaning and meshing happen only when the slicer's
+  Machine start G-code (or you) calls `START_PRINT`. A file from
+  FlashForge's untouched Orca profile stops at its first move with "Must
+  home axis first", before anything moves; `variable_prepare: 1` at the end
+  of `printer.cfg` brings the automatic preparation back. A ready Orca
+  Machine start G-code that turns on the flow mesh and tilt correction is
+  [`gcode/orca-machine-start-flow-tilt.gcode`](gcode/orca-machine-start-flow-tilt.gcode).
+
 - `START_PRINT` heats every tool to 100 °C below its print temperature at
   the start, beside the bed, then cleans the other tools while the bed heats,
   and cleans the tool the print starts with **last**, after the mesh: purged,
