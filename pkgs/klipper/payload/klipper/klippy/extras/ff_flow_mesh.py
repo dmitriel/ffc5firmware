@@ -13,24 +13,43 @@ This strategy keeps the nozzle on the flat G-code plane and lets the first
 layer fill the gap: thicker over a low spot, thinner over a high one, with
 the extrusion scaled to match, so the layer's top comes out flat.
 
-THICKNESS LIMITS. A layer cannot be squashed thinner than min_thickness
-(0.1 mm) or laid thicker than max_thickness (the active nozzle's diameter).
+THICKNESS LIMITS. A layer cannot be squashed thinner than min_flow times
+its own height (half of it) or laid thicker than max_thickness (the active
+nozzle's diameter).
 Where the gap would fall outside them, the nozzle follows the mesh just far
 enough to hold the limit -- standard behaviour, reduced by what the limit
 lets the layer absorb -- and what is left over carries into the next layer.
 Each layer flattens what it can, so the remaining mesh shrinks layer by
 layer until it is flat, and from then on the nozzle prints on the flat plane
-with normal flow.
+with normal flow. A layer is also never extruded at more than max_flow
+(1.5x) its nominal flow: over a deep low spot a thin second layer would
+otherwise be asked for two or three times its plastic, more than the bead
+can stack or the hotend can melt at that speed, so the gap is spread over
+more layers instead.
+
+THE REFERENCE PLANE. Only the mesh's unevenness is worth absorbing. Its
+average height -- an adaptive mesh routinely sits 0.1 mm off zero -- makes
+no layer any flatter whether the nozzle follows it or the plastic fills it,
+and filling it thickens every point for nothing. So the nozzle follows the
+mesh's mean (taken when the flow mesh starts) as standard bed mesh would,
+and the arithmetic below works on mesh - mean.
+
+CONSTANT VOLUMETRIC FLOW. Where the extrusion is scaled by t / h, the move's
+speed is scaled by h / t, so the plastic per second -- what the hotend has
+to melt -- stays what the slicer planned: slower over a low spot, faster over
+a high one (the toolhead's own velocity and acceleration limits still
+apply).
 
 THE ARITHMETIC, per point (x, y) on the bed. r is how far the printed
-surface sits above the flat G-code plane; before the first layer it is the
-bed mesh itself. A layer of nominal height h then has a gap of h - r, which
-is clamped to [min_thickness, max_thickness] to give the thickness t laid
-there. The nozzle sits at the layer's G-code Z + (t - (h - r)), the new
-surface is r + t - h above the plane, and the extrusion is scaled by t / h.
-A flat bed (r = 0) gives t = h everywhere, which is plain printing. Limits
-are widened to h itself for a layer thinner than min_thickness or thicker
-than max_thickness, so such a layer is never forced off its own height.
+surface sits above the flat G-code plane (shifted by the reference); before
+the first layer it is the bed mesh less its mean. A layer of nominal
+height h then has a gap of h - r, which is clamped to
+[min_flow * h, min(max_thickness, max_flow * h)] to give the thickness t
+laid there. The nozzle sits at the layer's G-code Z + (t - (h - r)), the
+new surface is r + t - h above the plane, and the extrusion is scaled by
+t / h. A flat bed (r = 0) gives t = h everywhere, which is plain printing.
+The upper limit is widened to h itself for a layer thicker than
+max_thickness, so such a layer is never forced off its own height.
 
 LAYERS. The first layer's height is given by the print start
 (START_PRINT / ADAPTIVE_MESH LAYER=, which [ff_print] reads from the file's
@@ -51,15 +70,18 @@ onto the plate's fitted plane, frozen at the print start, and bed_mesh then
 holds the plate in that tilted frame (its height above the plane, along
 the normal). This transform, its layers and its mesh lookups are all in
 that frame already, so nothing here changes: it absorbs the plate relative
-to the plane, and the nozzle stays on the tilted plane, not machine Z.
+to the plane, and the nozzle stays on the tilted plane, not machine Z. The
+reference is the mean of that frame mesh (FrameMesh.get_mesh_matrix): the
+plate's average height above the plane, which tilt's own Z offset (the
+plane at the footprint's centre) leaves near zero over an adaptive mesh.
 
 HOW IT SITS IN KLIPPER. bed_mesh keeps its mesh loaded and goes on adding
 it to every move, so ff_bed_guard, the screens and anything else that reads
 it see the real plate. This transform sits above ff_toolchange's per-tool
 frame -- at the top of the chain, until a print excludes an object and
 exclude_object installs over it -- and sends each move down with
-(r - mesh) added to Z: bed_mesh's own +mesh cancels the mesh part, leaving
-the nozzle at G-code Z + r. Moves are split every split_distance so that
+(reference + r - mesh) added to Z: bed_mesh's own +mesh cancels the mesh
+part, leaving the nozzle at G-code Z + reference + r. Moves are split every split_distance so that
 cancellation holds along the move and not only at its ends. Dock moves,
 which ff_toolchange runs in raw machine coordinates, pass through untouched.
 
@@ -99,16 +121,20 @@ def unlink_move_transform(gcode_move, transform):
     return False
 
 
-def layer_surface(mesh_z, heights, min_thickness, max_thickness):
+def layer_surface(mesh_z, heights, min_flow, max_thickness, max_flow=None):
     """(r, t) after printing layers of `heights` over a bed at `mesh_z`.
 
-    r is the printed surface's height above the flat G-code plane, t the
-    thickness of the last layer (None before any).
+    mesh_z is measured from the reference plane. r is the printed surface's
+    height above the flat G-code plane, t the thickness of the last layer
+    (None before any). t is held between min_flow and max_flow times the
+    layer's own height, and under max_thickness.
     """
     r, t = mesh_z, None
     for h in heights:
-        lo = min(min_thickness, h)
-        hi = max(max_thickness, h)
+        lo = min_flow * h
+        hi = max_thickness if max_flow is None \
+            else min(max_thickness, max_flow * h)
+        hi = max(hi, h)
         t = min(max(h - r, lo), hi)
         r += t - h
     return r, t
@@ -153,9 +179,11 @@ class FFFlowMesh:
     def __init__(self, config):
         self.printer = config.get_printer()
         self.gcode = self.printer.lookup_object('gcode')
-        self.min_thickness = config.getfloat('min_thickness', 0.1, above=0.)
+        self.min_flow = config.getfloat('min_flow', 0.5, above=0.,
+                                        maxval=1.)
         self.max_thickness = config.getfloat('max_thickness', None,
                                              above=0.)
+        self.max_flow = config.getfloat('max_flow', 1.5, minval=1.)
         self.split_distance = config.getfloat('split_distance', 2., above=0.)
         self.next_transform = None
         self.active = False
@@ -163,7 +191,10 @@ class FFFlowMesh:
         self.first_seen = False
         self.flat_layer = None
         self.max_residual = 0.
-        self.run_min = self.run_max = None
+        self.run_max = None
+        self.run_min_flow = self.min_flow
+        self.run_flow = self.max_flow
+        self.reference = 0.
         self.last = None
         self.last_offset = 0.
         self.e_shift = 0.
@@ -183,7 +214,12 @@ class FFFlowMesh:
         if hi is None:
             toolhead = self.printer.lookup_object('toolhead')
             hi = getattr(toolhead.get_extruder(), 'nozzle_diameter', 0.4)
-        return self.run_min, hi
+        return self.run_min_flow, hi
+
+    def _surface(self, mesh_z, heights):
+        lo, hi = self._limits()
+        return layer_surface(mesh_z - self.reference, heights, lo, hi,
+                             self.run_flow)
 
     def _mesh(self):
         bed_mesh = self.printer.lookup_object('bed_mesh', None)
@@ -219,23 +255,21 @@ class FFFlowMesh:
         mesh_z = mesh.calc_z(bed_x, bed_y)
         heights = self._surface_heights(z, extruding)
         if heights is None:
-            return -mesh_z, 1.
-        lo, hi = self._limits()
-        r, t = layer_surface(mesh_z, heights, lo, hi)
+            return self.reference - mesh_z, 1.
+        r, t = self._surface(mesh_z, heights)
         flow = t / heights[-1] if extruding and heights else 1.
-        return r - mesh_z, flow
+        return self.reference + r - mesh_z, flow
 
     def _check_flat(self):
         """After a new layer: is what is left of the mesh flat yet?"""
         mesh = self._mesh()
         if mesh is None:
             return
-        lo, hi = self._limits()
         heights = self.layers.heights()
         worst = 0.
         for row in mesh.get_mesh_matrix():
             for mesh_z in row:
-                r, _ = layer_surface(mesh_z, heights, lo, hi)
+                r, _ = self._surface(mesh_z, heights)
                 worst = max(worst, abs(r))
         self.max_residual = worst
         if worst <= FLAT_TOLERANCE and self.flat_layer is None:
@@ -286,8 +320,10 @@ class FFFlowMesh:
             offset, flow = self.adjust(px + tool[0], py + tool[1],
                                        pz - babystep, extruding)
             out_e += de / count * (flow if extruding else 1.)
+            # Same plastic per second as the slicer planned.
+            seg_speed = speed / flow if extruding and flow > 0. else speed
             self.next_transform.move([px, py, pz + offset, out_e] + rest,
-                                     speed)
+                                     seg_speed)
             self.last_offset = offset
         self.e_shift = out_e - e
         self.last = list(newpos)
@@ -298,7 +334,7 @@ class FFFlowMesh:
                 pos[3] - self.e_shift] + list(pos[4:])
 
     # -- commands ----------------------------------------------------------
-    def start(self, min_thickness, max_thickness, first_layer):
+    def start(self, min_flow, max_thickness, first_layer, max_flow=None):
         bed_mesh = self.printer.lookup_object('bed_mesh', None)
         if bed_mesh is None or bed_mesh.get_mesh() is None:
             raise self.gcode.error("flow mesh: no bed mesh is loaded")
@@ -309,8 +345,10 @@ class FFFlowMesh:
         if first_layer <= 0.:
             raise self.gcode.error("flow mesh: the first layer height is "
                                    "needed (FIRST_LAYER=)")
-        self.run_min = min_thickness
+        self.run_min_flow = min_flow
         self.run_max = max_thickness
+        self.run_flow = self.max_flow if max_flow is None else max_flow
+        self.reference = self._mean(bed_mesh.get_mesh())
         self.layers = LayerTracker(first_layer)
         self.first_seen = False
         self.flat_layer = None
@@ -325,8 +363,14 @@ class FFFlowMesh:
         self.e_shift = 0.
         self.active = True
         gcode_move.reset_last_position()
-        logging.info("ff_flow_mesh: started, thickness %.3f..%s",
-                     min_thickness, max_thickness)
+        logging.info("ff_flow_mesh: started, flow %.2f..%.2f, max thickness "
+                     "%s, reference %.4f", min_flow, self.run_flow,
+                     max_thickness, self.reference)
+
+    @staticmethod
+    def _mean(mesh):
+        points = [z for row in mesh.get_mesh_matrix() for z in row]
+        return sum(points) / len(points) if points else 0.
 
     def stop(self):
         if not self.active:
@@ -346,18 +390,20 @@ class FFFlowMesh:
         return True
 
     def cmd_FLOW_MESH_START(self, gcmd):
-        lo = gcmd.get_float('MIN_THICKNESS', self.min_thickness, above=0.)
+        lo = gcmd.get_float('MIN_FLOW', self.min_flow, above=0., maxval=1.)
         hi = gcmd.get_float('MAX_THICKNESS', self.max_thickness or 0.,
                             minval=0.)
         hi = hi if hi > 0. else None
-        if hi is not None and hi < lo:
-            raise gcmd.error("flow mesh: MAX_THICKNESS is below MIN_THICKNESS")
+        flow = gcmd.get_float('MAX_FLOW', self.max_flow, minval=1.)
         first = gcmd.get_float('FIRST_LAYER', above=0.)
-        self.start(lo, hi, first)
+        self.start(lo, hi, first, flow)
         gcmd.respond_info(
             "flow mesh: on -- first layer %.3f mm; the first layers keep a "
-            "flat nozzle and absorb the mesh, %.2f..%s mm thick"
-            % (first, lo, '%.2f' % hi if hi else 'nozzle diameter'))
+            "flat nozzle and absorb the mesh, %.2f..%.2fx their height "
+            "(at most %s mm) with the speed scaled to hold the volumetric "
+            "rate; the nozzle follows the mesh's mean (%+.3f mm)"
+            % (first, lo, flow, '%.2f' % hi if hi else 'the nozzle diameter',
+               self.reference))
 
     def cmd_FLOW_MESH_STOP(self, gcmd):
         if self.stop():
@@ -369,9 +415,10 @@ class FFFlowMesh:
             return
         lo, hi = self._limits()
         gcmd.respond_info(
-            "flow mesh: on, thickness %.2f..%.2f mm, layer %d (Z %.3f), "
-            "mesh left %.4f mm%s"
-            % (lo, hi, len(self.layers.tops), self.layers.top(),
+            "flow mesh: on, flow %.2f..%.2fx, max thickness %.2f mm, "
+            "reference %+.3f mm, layer %d (Z %.3f), mesh left %.4f mm%s"
+            % (lo, self.run_flow, hi, self.reference,
+               len(self.layers.tops), self.layers.top(),
                self.max_residual,
                ", flat since layer %d" % self.flat_layer
                if self.flat_layer is not None else ""))
@@ -381,9 +428,11 @@ class FFFlowMesh:
                 'layer': len(self.layers.tops),
                 'layer_z': self.layers.top(),
                 'mesh_left': self.max_residual,
+                'reference': self.reference,
+                'max_flow': self.run_flow if self.active else self.max_flow,
                 'flat_layer': self.flat_layer,
-                'min_thickness': self.run_min if self.active
-                else self.min_thickness}
+                'min_flow': self.run_min_flow if self.active
+                else self.min_flow}
 
 
 def load_config(config):

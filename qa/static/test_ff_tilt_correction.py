@@ -748,7 +748,7 @@ def test_the_flow_mesh_absorbs_the_plate_in_the_frame(tc, tmp_path):
     obj, printer, _ = started(tc, tmp_path, bumpy)
     flow = fm.FFFlowMesh(SimpleNamespace(
         get_printer=lambda: printer,
-        getfloat=lambda o, d=None, **k: {'min_thickness': 0.1,
+        getfloat=lambda o, d=None, **k: {'min_flow': 0.5,
                                          'split_distance': 2.}.get(o, d)))
     printer.objects["ff_flow_mesh"] = flow
     flow.start(0.1, None, 0.2)
@@ -756,9 +756,16 @@ def test_the_flow_mesh_absorbs_the_plate_in_the_frame(tc, tmp_path):
     flow.move([60., 100., 0.2, 0.], 100.)
     flow.move([180., 100., 0.2, 1.], 100.)
     # The first layer's nozzle is flat ON THE TILTED PLANE: frame height
-    # exactly 0.2 at every split, the plate absorbed in the layer.
+    # 0.2 plus the reference -- the mean of the plate above that plane, read
+    # from the frame mesh -- at every split, the rest absorbed in the layer.
+    frame_mean = sum(z for row in printer.bed_mesh.get_mesh().get_mesh_matrix()
+                     for z in row)
+    frame_mean /= sum(len(row) for row in
+                      printer.bed_mesh.get_mesh().get_mesh_matrix())
+    assert flow.reference == pytest.approx(frame_mean, abs=1e-9)
     for m in printer.toolhead.moves[-60:]:
-        assert obj.to_frame(m)[2] - OZ == pytest.approx(0.2, abs=1e-9)
+        assert obj.to_frame(m)[2] - OZ == pytest.approx(
+            0.2 + flow.reference, abs=1e-9)
 
 
 def test_the_tools_offsets_ride_outside_the_rotation(tc, tmp_path):
