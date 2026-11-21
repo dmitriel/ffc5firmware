@@ -81,8 +81,12 @@ it see the real plate. This transform sits above ff_toolchange's per-tool
 frame -- at the top of the chain, until a print excludes an object and
 exclude_object installs over it -- and sends each move down with
 (reference + r - mesh) added to Z: bed_mesh's own +mesh cancels the mesh
-part, leaving the nozzle at G-code Z + reference + r. Moves are split every split_distance so that
-cancellation holds along the move and not only at its ends. Dock moves,
+part, leaving the nozzle at G-code Z + reference + r. The offset is looked
+up every split_distance along a move so that cancellation holds along it
+and not only at its ends, but a piece goes down only where a straight one
+would miss those points by more than split_tolerance (0.005 mm): each piece
+costs a full pass through everything below, and one per 2 mm made a long
+travel hold the reactor for a third of a second. Dock moves,
 which ff_toolchange runs in raw machine coordinates, pass through untouched.
 
 FLOW_MESH_START turns it on for one print and FLOW_MESH_STOP off; END_PRINT
@@ -95,6 +99,55 @@ import math
 
 EPSILON = 1e-4
 FLAT_TOLERANCE = 1e-4
+# Pieces of one move may differ in extrusion factor by this much and still
+# go down as one piece, extruded at their mean.
+FLOW_TOLERANCE = 0.01
+# The longest run of samples one piece may cover. Bounds merge_pieces'
+# work per move; at split_distance 2 mm it is 64 mm.
+MAX_MERGE = 32
+
+
+def merge_pieces(samples, z_tolerance, flow_tolerance=None):
+    """Group a move's equally spaced samples into as few pieces as hold.
+
+    samples[0] is where the move starts, the rest are the points every
+    split_distance along it; each is (x, y, z, offset, flow). Returns
+    [(a, b)]: send a piece from sample a to sample b, the samples in
+    between dropped. bed_mesh below adds the mesh along each piece, so a
+    dropped sample k lands at the straight line between a and b instead of
+    at its own offset: a piece is allowed while every dropped sample is
+    within z_tolerance of that line, which bounds the nozzle's error to it
+    over the whole move. With flow_tolerance (an extruding move) the
+    pieces' extrusion factors must also agree to within it, since a piece
+    is extruded at their mean.
+
+    Once the mesh is absorbed the offset is reference - mesh: smooth, so a
+    long travel or line comes out as a few pieces where it used to be one
+    per split_distance."""
+    pieces, a, n = [], 0, len(samples) - 1
+    while a < n:
+        b = a + 1
+        while b < n and b - a < MAX_MERGE and \
+                _piece_holds(samples, a, b + 1, z_tolerance,
+                             flow_tolerance):
+            b += 1
+        pieces.append((a, b))
+        a = b
+    return pieces
+
+
+def _piece_holds(samples, a, b, z_tolerance, flow_tolerance):
+    oa, ob = samples[a][3], samples[b][3]
+    span = float(b - a)
+    for k in range(a + 1, b):
+        line = oa + (ob - oa) * (k - a) / span
+        if abs(samples[k][3] - line) > z_tolerance:
+            return False
+    if flow_tolerance is not None:
+        flows = [s[4] for s in samples[a + 1:b + 1]]
+        if max(flows) - min(flows) > flow_tolerance:
+            return False
+    return True
 
 
 def unlink_move_transform(gcode_move, transform):
@@ -185,6 +238,8 @@ class FFFlowMesh:
                                              above=0.)
         self.max_flow = config.getfloat('max_flow', 1.5, minval=1.)
         self.split_distance = config.getfloat('split_distance', 2., above=0.)
+        self.split_tolerance = config.getfloat('split_tolerance', 0.005,
+                                               above=0.)
         self.next_transform = None
         self.active = False
         self.layers = LayerTracker()
@@ -311,17 +366,31 @@ class FFFlowMesh:
                 self.flat_layer = None      # dropped back below it
             if self.flat_layer is None:
                 self._check_flat()
+        # Sample every split_distance, as before, but send a piece down only
+        # where a straight one would leave the samples (see merge_pieces):
+        # every piece costs a full trip through the tool frame, bed_mesh,
+        # tilt and the bed guard, ~2.7 ms on this SoC, and a 240 mm travel
+        # cut blindly into 120 of them held the reactor 329 ms.
         count = max(1, int(math.ceil(dxy / self.split_distance)))
-        out_e = le + self.e_shift
+        samples = [(lx, ly, lz, self.last_offset, 1.)]
         for i in range(1, count + 1):
             f = float(i) / count
             px, py = lx + (x - lx) * f, ly + (y - ly) * f
             pz = lz + (z - lz) * f
             offset, flow = self.adjust(px + tool[0], py + tool[1],
                                        pz - babystep, extruding)
-            out_e += de / count * (flow if extruding else 1.)
+            samples.append((px, py, pz, offset,
+                            flow if extruding else 1.))
+        out_e = le + self.e_shift
+        for a, b in merge_pieces(samples, self.split_tolerance,
+                                 FLOW_TOLERANCE if extruding else None):
+            flows = [s[4] for s in samples[a + 1:b + 1]]
+            out_e += de / count * sum(flows)
+            px, py, pz, offset, _flow = samples[b]
+            mean_flow = sum(flows) / len(flows)
             # Same plastic per second as the slicer planned.
-            seg_speed = speed / flow if extruding and flow > 0. else speed
+            seg_speed = speed / mean_flow if extruding and mean_flow > 0. \
+                else speed
             self.next_transform.move([px, py, pz + offset, out_e] + rest,
                                      seg_speed)
             self.last_offset = offset

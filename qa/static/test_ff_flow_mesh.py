@@ -1,6 +1,7 @@
 """Flow mesh: a flat nozzle, layers that absorb the plate, and a flat finish."""
 
 import importlib.util
+import math
 from types import SimpleNamespace
 
 import pytest
@@ -205,11 +206,12 @@ def line(obj, x0, x1, z, e0, e1):
 def test_the_nozzle_stays_flat_and_flow_absorbs_a_bump(fm):
     obj, printer = started(fm, lambda x, y: 0.05)
     line(obj, 0., 10., 0.2, 0., 1.)
-    extruding = printer.next.moves[-5:]      # 10 mm split every 2 mm
-    assert [m[0] for m in extruding] == pytest.approx([2., 4., 6., 8., 10.])
+    # A uniform bump: one straight piece holds, so the line goes as one.
+    extruding = printer.next.moves[-1]
+    assert extruding[0] == pytest.approx(10.)
     # bed_mesh adds +0.05 below, so the nozzle lands at exactly Z 0.2.
-    assert all(m[2] == pytest.approx(0.15) for m in extruding)
-    assert extruding[-1][3] == pytest.approx(0.75)   # 0.15 / 0.2 of E
+    assert extruding[2] == pytest.approx(0.15)
+    assert extruding[3] == pytest.approx(0.75)       # 0.15 / 0.2 of E
     assert obj.flat_layer == 1
 
 
@@ -371,8 +373,9 @@ def test_the_nozzle_follows_the_mesh_mean_and_absorbs_only_the_rest(fm):
     # 0.2 - 0.09 = 0.11 thick there, the nozzle at Z 0.2 - 0.1.
     last = printer.next.moves[-1]
     assert last[2] + (-0.01) == pytest.approx(0.1)
-    seg_e = last[3] - printer.next.moves[-2][3]
-    assert seg_e == pytest.approx(0.2 * 0.11 / 0.2)
+    # Layer 1 is 0.1 + 0.001 x thick, sampled every 2 mm: x = 2..10 gives
+    # 0.102 .. 0.110 of each 0.2 mm of E.
+    assert last[3] == pytest.approx(0.102 + 0.104 + 0.106 + 0.108 + 0.110)
 
 
 def test_a_uniformly_offset_plate_prints_plain_layers(fm):
@@ -388,10 +391,10 @@ def test_a_uniformly_offset_plate_prints_plain_layers(fm):
 def test_speed_is_scaled_to_hold_the_volumetric_rate(fm):
     obj, printer = started(fm, lambda x, y: 0.05)    # layer 1 at 0.75x
     line(obj, 0., 10., 0.2, 0., 1.)
-    assert printer.next.speeds[-5:] == pytest.approx([100. / 0.75] * 5)
+    assert printer.next.speeds[-1] == pytest.approx(100. / 0.75)
     obj2, printer2 = started(fm, lambda x, y: -0.1)  # layer 1 at 1.5x
     line(obj2, 0., 10., 0.2, 0., 1.)
-    assert printer2.next.speeds[-5:] == pytest.approx([100. / 1.5] * 5)
+    assert printer2.next.speeds[-1] == pytest.approx(100. / 1.5)
 
 
 def test_travel_and_retracts_keep_their_speed(fm):
@@ -411,3 +414,80 @@ def test_the_configured_max_flow_is_the_default(fm):
     assert obj.run_flow == 1.5
     assert obj.get_status(0.)["max_flow"] == 1.5
     assert obj.get_status(0.)["min_flow"] == 0.5
+
+
+# -- how many pieces a move becomes ------------------------------------------
+
+def _wavy(x, y):
+    """A plate with a bump every ~60 mm, 0.05 mm high."""
+    return 0.05 * math.sin(x / 10.) + 0.0002 * y
+
+
+def _nozzle_error(printer, start, z):
+    """Worst distance, at every split_distance sample, between where the
+    nozzle goes (straight lines between the pieces sent down, plus the
+    mesh bed_mesh adds) and where the 2 mm pieces would have put it."""
+    sent = [list(start)] + printer.next.moves
+    worst = 0.
+    for i in range(len(sent) - 1):
+        a, b = sent[i], sent[i + 1]
+        length = abs(b[0] - a[0]) + abs(b[1] - a[1])
+        steps = max(1, int(round(length / 2.)))
+        for k in range(steps + 1):
+            f = k / float(steps)
+            x = a[0] + (b[0] - a[0]) * f
+            y = a[1] + (b[1] - a[1]) * f
+            nozzle = a[2] + (b[2] - a[2]) * f + _wavy(x, y)
+            # Flat (mean pinned to 0): the nozzle belongs at G-code Z.
+            worst = max(worst, abs(nozzle - z))
+    return worst
+
+
+def test_a_long_travel_after_flat_is_a_few_pieces_not_one_per_2mm(fm):
+    obj, printer = started(fm, lambda x, y: 0.05)
+    line(obj, 0., 10., 0.2, 0., 1.)
+    line(obj, 10., 0., 0.4, 1., 2.)
+    assert obj.flat_layer is not None
+    printer.next.moves.clear()
+    obj.move([240., 10., 0.6, 2.], 500.)            # 240 mm cross-bed travel
+    # Flat plate: one straight piece holds, capped at MAX_MERGE samples.
+    assert len(printer.next.moves) == 4             # 120 samples / 32
+    assert printer.next.moves[-1][:3] == pytest.approx([240., 10., 0.55])
+
+
+def test_merged_pieces_keep_the_nozzle_within_tolerance_of_the_plane(fm):
+    obj, printer = started(fm, _wavy)
+    obj.layers = fm.LayerTracker(0.2)
+    obj.layers.tops = [0.2, 0.4]
+    obj.flat_layer = 1
+    obj.last_offset = obj.adjust(0., 10., 0.6, False)[0]
+    printer.next.pos = [0., 10., 0.6 + obj.last_offset, 2.]
+    obj.last = [0., 10., 0.6, 2.]
+    printer.next.moves.clear()
+    obj.move([240., 10., 0.6, 2.], 500.)
+    pieces = len(printer.next.moves)
+    assert pieces < 120 / 2                         # far fewer than before
+    start = [0., 10., 0.6 + obj.adjust(0., 10., 0.6, False)[0]]
+    assert _nozzle_error(printer, start, 0.6) <= \
+        obj.split_tolerance + 1e-9
+
+
+def test_extrusion_is_conserved_when_pieces_merge(fm):
+    obj, printer = started(fm, _wavy)
+    obj.move([0., 10., 0.2, 0.], 100.)
+    obj.move([100., 10., 0.2, 5.], 100.)            # layer 1, flow varies
+    # Every 2 mm sample's E is counted exactly once, merged or not.
+    total = sum(0.1 * obj._surface(_wavy(2. * i, 10.), [0.2])[1] / 0.2
+                for i in range(1, 51))
+    assert printer.next.moves[-1][3] == pytest.approx(total)
+
+
+def test_merge_pieces_splits_where_the_offset_bends(fm):
+    flat = [(i, 0., 0., 0.1, 1.) for i in range(11)]
+    assert fm.merge_pieces(flat, 0.005) == [(0, 10)]
+    bent = [(i, 0., 0., 0.02 if i == 5 else 0., 1.) for i in range(11)]
+    pieces = fm.merge_pieces(bent, 0.005)
+    # The bump's own sample must be a piece end, or it is cut off.
+    assert any(b == 5 for _a, b in pieces)
+    flows = [(i, 0., 0., 0., 1. + 0.02 * i) for i in range(11)]
+    assert len(fm.merge_pieces(flows, 0.005, 0.01)) == 10

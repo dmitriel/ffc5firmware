@@ -186,6 +186,17 @@ both printer models or through every real-world workflow.
 
 ### Fixed
 
+- A toolchange no longer shuts the eboard down with "Timer too close" just
+  after the pickup. The second lock step runs unsynced so it can finish
+  while the head leaves the dock, and its last steps were sent only by
+  Klipper's background flush; AFC's move back to the print, a long travel
+  across the bed, held Klipper for a third of a second and those steps went
+  out 61 ms late. The pickup now waits for the lock to finish before it
+  hands the head back, which costs about 0.1 s per change. The flow mesh
+  also no longer cuts every move into 2 mm pieces: it sends a piece only
+  where the nozzle would otherwise leave its path by more than 0.005 mm
+  (`split_tolerance`), so a cross-bed travel is a couple of dozen moves
+  instead of 120.
 - A toolchange no longer returns to the print with the new head still
   heating. AFC moved the head back over the part as soon as it had grabbed the
   new head, so the nozzle reached temperature above the model and left blobs
