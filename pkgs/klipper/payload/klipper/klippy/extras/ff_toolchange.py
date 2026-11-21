@@ -268,6 +268,16 @@ class FFToolchange:
         # degC-to-mm thermal term of the print-start Z offset
         # ((nozzle_temp - 120) * temp_offset); testConfig()+0xc in the app.
         self.temp_offset = config.getfloat('temp_offset', 0.00045)
+        # Nozzle growth baked into a HOT nozzle_z, taken back out of the
+        # per-tool Z (calibration_growth). The app calibrates cold and its
+        # temp_offset term above assumes that; Reforge heats first, so without
+        # this the growth is counted twice and every tool prints high by it.
+        # mm per degC above calibration_ambient: 0.00057 is ~0.1 mm at 200 C,
+        # the error seen on a unit calibrated at 200 C. Empirical -- tune it.
+        self.calibration_expansion = config.getfloat(
+            'calibration_expansion', 0.00057, minval=0.)
+        self.calibration_ambient = config.getfloat('calibration_ambient',
+                                                   25.0)
 
         # Per-tool G-code offsets -- differences against a base tool, exactly
         # as CommMgr::setGrabGcodeOffsetMgr computes them. See _derive_offsets
@@ -455,6 +465,12 @@ class FFToolchange:
         the plate. The print-only terms (thermal, bed, thin layer) are
         added by TOOLCHANGE_SET_PRINT_OFFSET on top.
 
+        Every nozzle_z also loses its calibration_growth: the hot-nozzle
+        growth a measurement at nozzle_temp carries, which the print-start
+        thermal term would otherwise add a second time. Zero for a cold
+        (factory) measurement. In the relative fallback both sides are
+        corrected, so the difference stays a cold-to-cold one.
+
         nozzle_* are the station-bore centre measured with each tool's
         nozzle ([ff_tool n], written by TOOL_CALIBRATE_TOOL_OFFSET);
         z_adjust is the user's per-tool Z tune (the app's zoffset.json).
@@ -481,12 +497,24 @@ class FFToolchange:
                 x_offsets.append(0.0)
                 y_offsets.append(0.0)
             if tool.calibrated() and z_station is not None:
-                z_offsets.append(tool.z_adjust + (tool.nozzle[2] - z_station))
+                z_offsets.append(tool.z_adjust + (tool.nozzle[2] - z_station)
+                                 - self.calibration_growth(tool))
             elif tool.calibrated() and base_ok:
-                z_offsets.append(tool.z_adjust + (tool.nozzle[2] - base_z))
+                z_offsets.append(tool.z_adjust + (tool.nozzle[2] - base_z)
+                                 - self.calibration_growth(tool)
+                                 + self.calibration_growth(tools[base]))
             else:
                 z_offsets.append(tool.z_adjust)
         return x_offsets, y_offsets, z_offsets
+
+    def calibration_growth(self, tool):
+        """mm a nozzle measured at tool.nozzle_temp had grown by, against
+        a cold measurement. 0 for nozzle_temp 0 (cold / factory import)."""
+        temp = getattr(tool, 'nozzle_temp', 0.0) or 0.0
+        if temp <= 0.0:
+            return 0.0
+        return self.calibration_expansion * max(
+            0.0, temp - self.calibration_ambient)
 
     def refresh_offsets(self, gcmd=None):
         """Re-derive after a calibration changed an [ff_tool] live."""
@@ -1426,11 +1454,13 @@ class FFToolchange:
             z += -0.06
         gcmd.respond_info(
             "print Z offset for T%d: %.3f (temp %+.3f, bed %+.2f,"
-            " layer %+.2f); T%d frame carries gap %+.3f, z_adjust %+.3f"
+            " layer %+.2f); T%d frame carries gap %+.3f, z_adjust %+.3f,"
+            " hot-calibration growth %+.3f"
             % (tool, z, (nozzle - 120.0) * temp_coeff,
                0.08 if bed >= 100.0 else 0.0,
                -0.06 if 0 < int_layer <= 10 else 0.0,
-               tool, nozzles[tool][2] - z_station, z_adjusts[tool]))
+               tool, nozzles[tool][2] - z_station, z_adjusts[tool],
+               -self.calibration_growth(self.tools[tool])))
         self.job_z = z
         self._reset_gcode_position()
 
@@ -1587,9 +1617,13 @@ class FFToolchange:
         lines.append("geometry ([ff_tool n] / [ff_toolchange]):")
         for tool_object in self.tools:
             if tool_object.calibrated():
-                lines.append("  T%d nozzle (%.4f, %.4f, %.4f)  z_adjust %+.3f"
+                lines.append("  T%d nozzle (%.4f, %.4f, %.4f) at %s"
+                             "  growth %+.3f  z_adjust %+.3f"
                              % (tool_object.index, tool_object.nozzle[0],
                                 tool_object.nozzle[1], tool_object.nozzle[2],
+                                ("%.0f C" % tool_object.nozzle_temp
+                                 if tool_object.nozzle_temp else "cold"),
+                                -self.calibration_growth(tool_object),
                                 tool_object.z_adjust))
             else:
                 lines.append("  T%d nozzle NOT CALIBRATED"

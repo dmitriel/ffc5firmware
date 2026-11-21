@@ -224,7 +224,10 @@ Re-run `TOOL_LOCATE_SENSOR` whenever the station or bed is disturbed.
 `CALIBRATE_TOOL_OFFSETS` checks the plate and measures the station once, then
 passes `PLATE_CHECK=0` to each requested tool so that work is not repeated.
 Each nozzle is heated to 200 C, waited within 3 C, held hot through the two
-passes, and always turned off afterward. `TEMP=` overrides 200 C. It is
+passes, and always turned off afterward. `TEMP=` overrides 200 C. The
+temperature is saved with the result as `nozzle_temp`, and the nozzle's
+growth at that temperature is taken back out of the Z offset (see
+`calibration_expansion` in `ff-toolchange.cfg`). It is
 klipper-toolchanger's documented entry point, so it is the name HelixScreen's
 setup wizard and other UIs look for. The low-level commands remain available
 for compatibility and diagnostics.
@@ -269,7 +272,8 @@ tool is mounted, is added on every later grab of that tool, and persists.
 
 * Per-tool X/Y offsets are **differences vs a base tool (T0)**, applied on
   each grab the way `CommMgr::setGrabGcodeOffsetMgr` computes them. Z is
-  **absolute** on every grab: `nozzle_z − station_z + z_adjust`, the
+  **absolute** on every grab: `nozzle_z − station_z + z_adjust`, less the
+  hot-calibration growth recorded with `nozzle_temp`, the
   bed-frame gap the app only sets once per print (`BuildPage::startPrint`).
   This departs from the app deliberately — with the app's scheme a tool
   picked up outside a print sits in the raw eddy frame and a manual

@@ -145,6 +145,7 @@ already sets.
 #*# nozzle_x = 16.505066
 #*# nozzle_y = 212.775040
 #*# nozzle_z = 1.472569
+#*# nozzle_temp = 200.0
 #*# z_adjust = -0.020
 ```
 
@@ -154,7 +155,16 @@ On every grab of a tool, the toolchanger applies:
 X = nozzle_x[tool] - nozzle_x[base]              difference vs the base tool
 Y = nozzle_y[tool] - nozzle_y[base]
 Z = nozzle_z[tool] - station_z + z_adjust[tool]  absolute
+    - growth(nozzle_temp[tool])
 ```
+
+`growth` is how much longer the nozzle was when it was measured:
+`calibration_expansion × (nozzle_temp − calibration_ambient)` from
+`[ff_toolchange]`, about 0.1 mm at 200 C. A hot nozzle touches the station
+with the carriage that much higher, and the print-start thermal term already
+allows for the nozzle heating up, so without this the growth is counted
+twice and the tool prints high. A cold measurement (`nozzle_temp` 0, as the
+factory import writes) has no growth.
 
 X and Y are differences, so the base tool's are zero. Z is absolute, which is
 what makes Z0 the bed plane whenever a tool is mounted — not only after

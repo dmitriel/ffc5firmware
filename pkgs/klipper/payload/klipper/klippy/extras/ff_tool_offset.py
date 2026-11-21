@@ -815,7 +815,7 @@ class FFToolOffset:
             # Staged only once the guards above have passed, so a failed run
             # really does leave nothing saved -- which is what they promise.
             if save:
-                tool_object.set_nozzle(center_x, center_y, z_trigger)
+                tool_object.set_nozzle(center_x, center_y, z_trigger, temp)
 
             self._run('G1 Z%.3f F%d' % (self.z_final, FEED_PASS1))
             self._run('M400')
@@ -938,6 +938,10 @@ class FFToolOffset:
         definition; its Z is not."""
         base_tool = (self.toolchange.offset_base
                      if self.toolchange is not None else 0)
+        def growth(tool_object):
+            if self.toolchange is None:
+                return 0.0
+            return self.toolchange.calibration_growth(tool_object)
         lines = []
         for tool, (center_x, center_y, z_trigger) in sorted(results.items()):
             lines.append("T%d measured: nozzle centre %.4f, %.4f"
@@ -953,15 +957,19 @@ class FFToolOffset:
             lines.append("offsets a toolchange applies (X/Y vs T%d; Z %s):"
                          % (base_tool,
                             "absolute: nozzle_z - station_z + z_adjust"
+                            " - hot growth"
                             if z_station is not None
                             else "vs T%d, + z_adjust" % base_tool))
             for tool, (center_x, center_y, z_trigger) in sorted(
                     results.items()):
                 z_adjust = self.tools[tool].z_adjust
                 if z_station is not None:
-                    z_applied = z_adjust + (z_trigger - z_station)
+                    z_applied = (z_adjust + (z_trigger - z_station)
+                                 - growth(self.tools[tool]))
                 else:
-                    z_applied = z_adjust + (z_trigger - base_nozzle[2])
+                    z_applied = (z_adjust + (z_trigger - base_nozzle[2])
+                                 - growth(self.tools[tool])
+                                 + growth(self.tools[base_tool]))
                 lines.append("  T%d: dX %+.4f  dY %+.4f  Z %+.4f"
                              % (tool, center_x - base_nozzle[0],
                                 center_y - base_nozzle[1], z_applied))

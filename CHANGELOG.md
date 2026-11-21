@@ -186,6 +186,19 @@ both printer models or through every real-world workflow.
 
 ### Fixed
 
+- Every tool no longer prints about 0.1 mm too high after
+  `CALIBRATE_TOOL_OFFSETS`. The calibration measures each nozzle hot
+  (200 C), so its `nozzle_z` already includes the nozzle's thermal growth,
+  and the print-start thermal term, copied from the stock firmware that
+  measures cold, added that growth a second time. Each calibration now records
+  its temperature as `[ff_tool n] nozzle_temp`, and the toolchanger subtracts
+  `calibration_expansion` (0.00057 mm per degree above 25 C, ~0.1 mm at
+  200 C) from that tool's Z offset. Factory imports are cold and are not
+  corrected. Calibrations made before this update have no `nozzle_temp`, so
+  they are treated as cold too: run `CALIBRATE_TOOL_OFFSETS` and
+  `SAVE_CONFIG` again to pick up the fix. If you set a `z_adjust` to make up
+  for this, remove it. The coefficient is tunable in `[ff_toolchange]` and
+  has been checked against only one printer's report so far.
 - A toolchange no longer returns to the print with the new head still
   heating. AFC moved the head back over the part as soon as it had grabbed the
   new head, so the nozzle reached temperature above the model and left blobs
