@@ -754,18 +754,24 @@ def test_the_flow_mesh_absorbs_the_plate_in_the_frame(tc, tmp_path):
     flow.start(0.1, None, 0.2)
     assert printer.gcode_move.move_transform is flow
     flow.move([60., 100., 0.2, 0.], 100.)
+    first = len(printer.toolhead.moves)
     flow.move([180., 100., 0.2, 1.], 100.)
+    line = printer.toolhead.moves[first:]
+    assert line
     # The first layer's nozzle is flat ON THE TILTED PLANE: frame height
     # 0.2 plus the reference -- the mean of the plate above that plane, read
     # from the frame mesh -- at every split, the rest absorbed in the layer.
+    # The flow mesh sends a piece only where a straight one would leave its
+    # samples by more than split_tolerance, so that is how close bed_mesh's
+    # own splits in between land.
     frame_mean = sum(z for row in printer.bed_mesh.get_mesh().get_mesh_matrix()
                      for z in row)
     frame_mean /= sum(len(row) for row in
                       printer.bed_mesh.get_mesh().get_mesh_matrix())
     assert flow.reference == pytest.approx(frame_mean, abs=1e-9)
-    for m in printer.toolhead.moves[-60:]:
+    for m in line:
         assert obj.to_frame(m)[2] - OZ == pytest.approx(
-            0.2 + flow.reference, abs=1e-9)
+            0.2 + flow.reference, abs=flow.split_tolerance + 1e-9)
 
 
 def test_the_tools_offsets_ride_outside_the_rotation(tc, tmp_path):

@@ -387,6 +387,9 @@ class FFToolchange:
         self.grab2_macro = config.get('grab2_macro', 'MOTOR_GRAB2')
         self.release_macro = config.get('release_macro', 'MOTOR_RELEASE')
         self.stop_macro = config.get('stop_macro', 'MOTOR_STOP')
+        # The [manual_stepper] the lock macros drive. _grab waits for it
+        # before returning; absent, nothing is waited for.
+        self.lock_stepper = config.get('lock_stepper', 'gear_stepper')
         # firmwareExe auto-homes in doGrabExtruderLatest when not homed, but
         # there the user is standing at the touchscreen. A remote T<n> that
         # silently starts G28 can crash into whatever is on the bed, so the
@@ -638,6 +641,25 @@ class FFToolchange:
     def _wait_moves(self):
         # Equivalent of the app's M400 before sampling sensors.
         self.printer.lookup_object('toolhead').wait_moves()
+
+    def _wait_lock(self):
+        """Let an unsynced lock move (grab2's SYNC=0) finish before the
+        sequence returns.
+
+        grab2 runs its ~1.5 s lock move with SYNC=0 so it overlaps the exit.
+        Its last steps beyond the toolhead's own moves are sent only by
+        the toolhead's background flush timer, so anything that holds the
+        reactor while they are due -- AFC's restore travel right after the
+        change, 329 ms on a Creator 5 Pro -- sends them late and the eboard
+        shuts down with "Timer too close". MANUAL_STEPPER ... SYNC=1 puts
+        the toolhead's print time at the lock move's end; waiting for that
+        here, with the reactor free, flushes the whole move on time. Costs
+        only what the lock outlasts the exit by (~0.1 s)."""
+        if self.printer.lookup_object(
+                'manual_stepper %s' % self.lock_stepper, None) is None:
+            return
+        self._run('MANUAL_STEPPER STEPPER=%s SYNC=1' % self.lock_stepper)
+        self._wait_moves()
 
     def _sleep(self, seconds):
         self.reactor.pause(self.reactor.monotonic() + seconds)
@@ -1064,7 +1086,8 @@ class FFToolchange:
                     # 20 mm between them, but grab2's MANUAL_STEPPER flushes
                     # the lookahead, so that pullback stopped dead between
                     # two exit moves. SYNC=0 lets the lock finish during the
-                    # exit instead.
+                    # exit instead -- and _wait_lock below makes sure it has
+                    # finished before the sequence returns.
                     self._run(self.grab2_macro)
                     break
 
@@ -1083,6 +1106,7 @@ class FFToolchange:
 
             self._carried_withdraw(dock_x, self.x_safe)
             self._wait_moves()
+            self._wait_lock()
 
             # Verify: the tool must have LEFT its dock and the grab sensor
             # must be engaged. (doGrabExtruderLatest: !inLocation && grab)
