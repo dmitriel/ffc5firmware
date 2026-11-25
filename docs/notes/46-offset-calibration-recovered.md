@@ -5,9 +5,64 @@ double regs that capstone rejects, skipdata). Annotated `.asm` listing and tool 
 Klipper port: [`45-tool-offset-calibration.md`](45-tool-offset-calibration.md).
 Ghidra bodies were useless past the first `ErrorBak` ctor; everything below is from machine code.
 
+## 0. The owner-facing path is NOT the one below
+
+Recovered 2026-11-25 from the 1.9.7 image (`Creator5Pro-1.9.7-1.2.9-20260810.tgz`,
+`software-1.9.7` `firmwareExe`, symbols intact), with `llvm-objdump --triple=mipsel`.
+
+Sections 1-5 describe `CalibrationDialog`, the **factory test dialog**. What an owner runs
+-- the first-boot guide (`GuideCalibration::testOffset` @0x91b9b8) and the calibration page
+(`CalibrationPage::testOffset` @0x95c250) -- goes through
+`CommMgr::calibration_center_manager(int, bool isStation, float zTarget, TypeManager, bool clean)`
+@0x767354 instead. `MainCalibration` reaches the sibling `CommMgr::calibration_offset_manager`
+@0x761974 (`calibration_offset_clear_nozzle_mgr` then `calibration_offset_test_nozzle_mgr`).
+
+**Guide sequence** (`GuideCalibration::testOffset`):
+
+```
+releaseFourExtruder ; G1 Z10 F1200 ; SET_GCODE_OFFSET X=0 Y=0 MOVE=1 MOVE_SPEED=600
+G1 X43 Y226 F12000 ; M400 ; checkProbeZValue(&probeZ)        eddy PROBE_ACCURACY, empty carriage
+calibration_center_manager(.., isStation=1, zTarget=probeZ-5, TypeManager 6, clean=1)   station
+for each tool: calibration_center_manager(.., isStation=0, zTarget=probeZ+0, tool, clean=1)
+G1 Z100 F1200
+```
+
+**Per tool, with clean=1** (`calibration_center_manager` @0x767970..0x767b60; the station
+branch at @0x7676d4 skips it):
+
+```
+getGrabSensorStatus                         ; error 0x13 if the carriage is not free
+temp = getFilamentOperationTemp(tool)       ; the material's table temperature
+clearNozzleEddy(tool, temp, false, false)   ; @0x78e19c:
+    G1 X265 Y4.8 ; checkProbeZValue ; G1 Z<probeZ+8> ; doGrabExtruderMgr(tool)
+    moveLoadLocation ; heatManager(tool, temp) ; wait +-3 C
+    G92 E0 ; G1 E50 F<speed> ; M400 ; M106 P1 S153 ; G92 E0 ; G1 E-5 F<speed> ; M400
+    G1 X250 F6000 ; G1 Y13.8 F24000 ; G1 X266.5 F6000 ; G1 Z<probeZ+1> F600
+    heatManager(tool, temp - 100)           ; @0x78ff74 addiu -0x64
+    wait until |cur - (temp-100)| <= 3 C, 180 polls (0xb4)   ; @0x790034..0x79005c
+    M106 P1 S0 ; G1 Z<probeZ+8> F600 ; M400
+M106 P1 S0
+moveCylinderPos / two 4-point passes exactly as section 2, heater still at temp - 100
+store (cx2, cy2, zP2) -> extruder.json t<n>_offset_x/y/z
+zOffsetConfig()[tool] = 0                   ; @0x768fb4: the user's z_offset_t<n+1> is RESET
+heatManager(tool, 0) on exit                ; @0x7697f0
+```
+
+So **owner calibrations measure a purged, cold-wiped nozzle held at material temperature
+minus 100 C** -- 120 C for PLA at 220 C, which is exactly the reference of the print-start
+thermal term `(nozzle_temp - 120) * tempOffset` (40-offsets.md). The
+`calibration_offset_clear_nozzle` @0x765b48 variant does the same purge and cool to
+temp - 100, then turns the heater OFF (@0x766bc0) before measuring, so that path measures
+at <= temp - 100 and falling. Neither path measures at full temperature, and neither
+measures an unpurged nozzle.
+
+Other differences from the factory dialog: Z probe targets are relative to the eddy
+`probeZ` (station probeZ - 5, tools probeZ + 0) rather than the fixed -5 / -3, and a new
+tool measurement zeroes that tool's user Z tune.
+
 ## 1. Which variant the touchscreen runs
 
-`CalibrationDialog::doExtruderOffset` (button for the selected T0..T3, `this[0]` = TypeManager) snapshots the
+(Factory dialog -- see section 0 for the owner path.) `CalibrationDialog::doExtruderOffset` (button for the selected T0..T3, `this[0]` = TypeManager) snapshots the
 check-boxes into `this[0x1d..0x24]` and spawns `pthreadExtruderOffset` @0x7fcfe4:
 
 ```
