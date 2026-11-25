@@ -18,6 +18,10 @@ import contextlib
 import logging
 
 EXTRUDER_COUNT = 4
+# The nozzle temperature the app measures offsets at (PLA: purge at 220, cool
+# by 100) and the reference of its print-start thermal term. ff_tool.py has
+# the same constant for its nozzle_temp default.
+MEASURE_REFERENCE = 120.0
 
 # Timings and retry counts, straight from doGrabExtruderLatest and
 # doReleaseExtruderLatest. The app's waits are "N tries x usleep(50000)";
@@ -458,6 +462,13 @@ class FFToolchange:
         the plate. The print-only terms (thermal, bed, thin layer) are
         added by TOOLCHANGE_SET_PRINT_OFFSET on top.
 
+        Each nozzle_z also gets measurement_correction(): that thermal
+        term, (nozzle_temp - 120) * temp_offset, assumes the nozzle was
+        measured at 120 C, as the app does for PLA. A tool measured at any
+        other temperature already carries (measured - 120) * temp_offset of
+        growth, which is taken back out here. In the relative fallback
+        both sides are corrected.
+
         nozzle_* are the station-bore centre measured with each tool's
         nozzle ([ff_tool n], written by TOOL_CALIBRATE_TOOL_OFFSET);
         z_adjust is the user's per-tool Z tune (the app's zoffset.json).
@@ -484,12 +495,22 @@ class FFToolchange:
                 x_offsets.append(0.0)
                 y_offsets.append(0.0)
             if tool.calibrated() and z_station is not None:
-                z_offsets.append(tool.z_adjust + (tool.nozzle[2] - z_station))
+                z_offsets.append(tool.z_adjust + (tool.nozzle[2] - z_station)
+                                 + self.measurement_correction(tool))
             elif tool.calibrated() and base_ok:
-                z_offsets.append(tool.z_adjust + (tool.nozzle[2] - base_z))
+                z_offsets.append(tool.z_adjust + (tool.nozzle[2] - base_z)
+                                 + self.measurement_correction(tool)
+                                 - self.measurement_correction(tools[base]))
             else:
                 z_offsets.append(tool.z_adjust)
         return x_offsets, y_offsets, z_offsets
+
+    def measurement_correction(self, tool):
+        """Z to add to a nozzle_z measured at tool.nozzle_temp so the
+        print-start thermal term, referenced to 120 C, counts the growth
+        once. 0 at 120 C; -0.036 mm at 200 C with temp_offset 0.00045."""
+        temp = getattr(tool, 'nozzle_temp', MEASURE_REFERENCE)
+        return -(temp - MEASURE_REFERENCE) * self.temp_offset
 
     def refresh_offsets(self, gcmd=None):
         """Re-derive after a calibration changed an [ff_tool] live."""
@@ -1442,7 +1463,7 @@ class FFToolchange:
         nozzles = [tool_object.nozzle or (0.0, 0.0, 0.0)
                    for tool_object in self.tools]
         z_adjusts = [tool_object.z_adjust for tool_object in self.tools]
-        z = (nozzle - 120.0) * temp_coeff
+        z = (nozzle - MEASURE_REFERENCE) * temp_coeff
         if bed >= 100.0:
             z += 0.08
         int_layer = int(layer * 100.0)
@@ -1450,11 +1471,14 @@ class FFToolchange:
             z += -0.06
         gcmd.respond_info(
             "print Z offset for T%d: %.3f (temp %+.3f, bed %+.2f,"
-            " layer %+.2f); T%d frame carries gap %+.3f, z_adjust %+.3f"
-            % (tool, z, (nozzle - 120.0) * temp_coeff,
+            " layer %+.2f); T%d frame carries gap %+.3f, z_adjust %+.3f,"
+            " measured-at-%.0f C correction %+.3f"
+            % (tool, z, (nozzle - MEASURE_REFERENCE) * temp_coeff,
                0.08 if bed >= 100.0 else 0.0,
                -0.06 if 0 < int_layer <= 10 else 0.0,
-               tool, nozzles[tool][2] - z_station, z_adjusts[tool]))
+               tool, nozzles[tool][2] - z_station, z_adjusts[tool],
+               self.tools[tool].nozzle_temp,
+               self.measurement_correction(self.tools[tool])))
         self.job_z = z
         self._reset_gcode_position()
 
@@ -1611,9 +1635,12 @@ class FFToolchange:
         lines.append("geometry ([ff_tool n] / [ff_toolchange]):")
         for tool_object in self.tools:
             if tool_object.calibrated():
-                lines.append("  T%d nozzle (%.4f, %.4f, %.4f)  z_adjust %+.3f"
+                lines.append("  T%d nozzle (%.4f, %.4f, %.4f) at %.0f C"
+                             " (%+.3f)  z_adjust %+.3f"
                              % (tool_object.index, tool_object.nozzle[0],
                                 tool_object.nozzle[1], tool_object.nozzle[2],
+                                tool_object.nozzle_temp,
+                                self.measurement_correction(tool_object),
                                 tool_object.z_adjust))
             else:
                 lines.append("  T%d nozzle NOT CALIBRATED"

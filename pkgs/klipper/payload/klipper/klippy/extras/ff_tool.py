@@ -12,6 +12,11 @@
 #                    tool's nozzle, raw machine coords, G-code offset zeroed.
 #                    Written as a triple by TOOL_CALIBRATE_TOOL_OFFSET; all
 #                    three or none.
+#   nozzle_temp      The nozzle temperature nozzle_z was measured at, written
+#                    with it. Absent = 120 C, the app's own measuring
+#                    temperature for PLA (purge at 220, cool by 100), which
+#                    the print-start thermal term (nozzle_temp - 120) assumes.
+#                    ff_toolchange corrects any other value with temp_offset.
 #   z_adjust         USER CORRECTION, added on top of the measured difference
 #                    at every grab. Klipper's own babystep is global, so this
 #                    is the only per-tool one. Set with TOOL_Z_ADJUST.
@@ -20,12 +25,16 @@
 #   X = nozzle_x[tool] - nozzle_x[base]        DIFFERENCE against a base tool
 #   Y = nozzle_y[tool] - nozzle_y[base]
 #   Z = nozzle_z[tool] - station_z + z_adjust[tool]   ABSOLUTE: raw eddy frame
-#                                               -> bed frame (~+3.2 mm)
+#       - (nozzle_temp[tool] - 120) * temp_offset   -> bed frame (~+3.2 mm)
 # Absolute values are stored, so recalibrating one tool leaves the others
 # valid. Applying nozzle_z - station_z at every grab means Z=0 is the bed
 # whenever a tool is mounted, not only after TOOLCHANGE_SET_PRINT_OFFSET.
 
 import logging
+
+# The nozzle temperature the app measures at, and the reference of its
+# print-start thermal term (BuildPage::startPrint, nozzle_temp - 120).
+MEASURE_REFERENCE = 120.0
 
 
 class FFTool:
@@ -56,6 +65,9 @@ class FFTool:
             raise config.error("%s: nozzle_x, nozzle_y and nozzle_z must be"
                                " set together" % self.name)
         self.nozzle = None if nozzle[0] is None else tuple(nozzle)
+        # Temperature of that measurement; see the header.
+        self.nozzle_temp = config.getfloat('nozzle_temp', MEASURE_REFERENCE,
+                                           above=0.)
         # User's persistent per-tool Z correction (TOOL_Z_ADJUST).
         self.z_adjust = config.getfloat('z_adjust', 0.0)
         self.printer.register_event_handler('klippy:connect',
@@ -80,14 +92,20 @@ class FFTool:
         configfile.set(self.name, 'dock_y', "%.6f" % y)
         logging.info("%s: dock = (%.6f, %.6f)", self.name, x, y)
 
-    def set_nozzle(self, x, y, z):
-        """Adopt a new measurement live and stage it for SAVE_CONFIG."""
+    def set_nozzle(self, x, y, z, temp=MEASURE_REFERENCE):
+        """Adopt a new measurement live and stage it for SAVE_CONFIG.
+
+        temp is the nozzle temperature it was measured at. Always written
+        with nozzle_z, so a new measurement never inherits an old one's."""
         self.nozzle = (float(x), float(y), float(z))
+        self.nozzle_temp = float(temp)
         configfile = self.printer.lookup_object('configfile')
         configfile.set(self.name, 'nozzle_x', "%.6f" % x)
         configfile.set(self.name, 'nozzle_y', "%.6f" % y)
         configfile.set(self.name, 'nozzle_z', "%.6f" % z)
-        logging.info("%s: nozzle = (%.6f, %.6f, %.6f)", self.name, x, y, z)
+        configfile.set(self.name, 'nozzle_temp', "%.1f" % temp)
+        logging.info("%s: nozzle = (%.6f, %.6f, %.6f) at %.1f C",
+                     self.name, x, y, z, temp)
 
     def set_z_adjust(self, z, save=False):
         """Live always; staged for SAVE_CONFIG only when asked.
@@ -112,7 +130,7 @@ class FFTool:
                 'z_adjust': self.z_adjust,
                 'calibrated': self.nozzle is not None,
                 'nozzle_x': nozzle_x, 'nozzle_y': nozzle_y,
-                'nozzle_z': nozzle_z}
+                'nozzle_z': nozzle_z, 'nozzle_temp': self.nozzle_temp}
 
 
 def load_config_prefix(config):

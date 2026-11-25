@@ -168,9 +168,13 @@ class FFLegacy:
                 stage(section, 'nozzle_x', nozzles[index][0])
                 stage(section, 'nozzle_y', nozzles[index][1])
                 stage(section, 'nozzle_z', nozzles[index][2])
+                # The app measures at 120 C (purge, cool by 100), the
+                # reference its print-start thermal term assumes.
+                stage(section, 'nozzle_temp', 120.0)
                 tool_object = self.printer.lookup_object(section, None)
                 if apply and tool_object is not None:
                     tool_object.nozzle = nozzles[index]
+                    tool_object.nozzle_temp = 120.0
             else:
                 report.append("  ! t%d_offset_x/y/z missing -- T%d not"
                               " imported" % (index, index))

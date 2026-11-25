@@ -105,8 +105,12 @@ store pass 2 `(cx, cy, zP2)` raw. Station: start `(cylinder_x, cylinder_y)`, sec
 Deliberate divergences (documented in the cfg): accel stays 100 for the whole run and is
 restored to the pre-run limit; optional `max_residual`/`min_radius`/`max_radius` guards; pass-2
 points use the 3-decimal-rounded centre actually commanded; `fit_circle` is the centroid-shifted
-`fitCircleStable` (identical result for 4 axis-aligned points); homing is automatic; tool passes
-heat to 200 C (or `TEMP=`), wait within 3 C, and turn the heater off on every exit.
+`fitCircleStable` (identical result for 4 axis-aligned points); homing is automatic. Tool passes
+follow the owner path, not the factory dialog (46-offset-calibration-recovered.md section 0):
+`_FF_NOZZLE_CLEAN MODE=standby` purges and cold-wipes, the tool is measured at the heater target
+that leaves (material − 100), and that temperature is saved as `nozzle_temp`; ff_toolchange
+corrects it to the 120 C reference of the print-start thermal term. Not cleaned: CLEAN=0, or a
+tool with no nozzle_z/station_z yet (the wipe Z needs its frame) -- measured at probe_temp, 120.
 
 ## Verified (mock harness, not in repo)
 

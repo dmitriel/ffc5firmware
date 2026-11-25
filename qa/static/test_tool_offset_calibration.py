@@ -80,37 +80,96 @@ def test_plate_check_refuses_a_sheet_spanning_both_points():
     assert not any("ESTOP" in line for line in check.commands)
 
 
-def test_tool_heater_is_turned_off_when_temperature_wait_fails():
-    module = load_module()
+def make_calibration(module, calibrated, station=(28.8, 212.6, -1.68),
+                     heater_target=120.0):
     offset = module.FFToolOffset.__new__(module.FFToolOffset)
     offset.name = "ff_tool_offset"
     offset.reactor = SimpleNamespace(monotonic=lambda: 0.0)
-    offset.printer = SimpleNamespace(command_error=CommandError)
+    heater = SimpleNamespace(
+        get_status=lambda _eventtime: {"target": heater_target})
+    heaters = SimpleNamespace(lookup_heater=lambda _name: heater)
+    toolhead = SimpleNamespace(wait_moves=lambda: None)
+    objects = {"heaters": heaters, "toolhead": toolhead}
+    offset.printer = SimpleNamespace(command_error=CommandError,
+                                     lookup_object=objects.__getitem__)
     offset.toolchange = SimpleNamespace(
         get_status=lambda _eventtime: {"current_tool": 0, "state_ok": True})
-    offset.tools = [SimpleNamespace(extruder_name="extruder")]
-    offset.calibration_temp = 200.0
+    offset.tools = [SimpleNamespace(
+        extruder_name="extruder", nozzle=(16.5, 212.8, 1.47),
+        nozzle_temp=120.0, calibrated=lambda: calibrated)]
+    offset.station = station
+    offset.probe_temp = 120.0
     offset.temperature_tolerance = 3.0
     offset.nozzle_x_shift = 12.5
     offset._check_homed = lambda _gcmd: None
     offset._run_plate_check = lambda _gcmd: None
     offset._cylinder = lambda: (28.5, 214.5)
     offset._leave_raw_frame = lambda *_args: None
-    commands = []
+    offset.commands = []
 
     def run(command):
-        commands.append(command)
+        offset.commands.append(command)
         if command.startswith("TEMPERATURE_WAIT"):
             raise CommandError("heater timeout")
 
     offset._run = run
+    return offset
+
+
+def test_uncalibrated_tool_is_measured_unpurged_at_probe_temp():
+    module = load_module()
+    offset = make_calibration(module, calibrated=False)
+    gcmd = GCmd()
+    with pytest.raises(CommandError, match="heater timeout"):
+        offset.cmd_TOOL_CALIBRATE_TOOL_OFFSET(gcmd)
+    assert not any("_FF_NOZZLE_CLEAN" in c for c in offset.commands)
+    assert offset.commands[0] == (
+        "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=120.0")
+    assert offset.commands[1] == (
+        "TEMPERATURE_WAIT SENSOR=extruder MINIMUM=117.0 MAXIMUM=123.0")
+    assert offset.commands[-1] == (
+        "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=0")
+    assert any("no clean" in line for line in gcmd.info)
+
+
+def test_calibrated_tool_is_cleaned_then_measured_at_the_cooled_target():
+    module = load_module()
+    offset = make_calibration(module, calibrated=True, heater_target=140.0)
+    with pytest.raises(CommandError, match="heater timeout"):
+        offset.cmd_TOOL_CALIBRATE_TOOL_OFFSET(GCmd({"TEMP": "240"}))
+    assert offset.commands[0] == (
+        "_FF_NOZZLE_CLEAN MODE=standby TOOLS=0 TEMPS=240.0,0,0,0")
+    # The clean leaves the heater at temp - clean_cool_delta: no re-heat.
+    assert not any(c.startswith("SET_HEATER_TEMPERATURE HEATER=extruder"
+                                " TARGET=1") for c in offset.commands)
+    assert offset.commands[1] == (
+        "TEMPERATURE_WAIT SENSOR=extruder MINIMUM=137.0 MAXIMUM=143.0")
+    assert offset.commands[-1] == (
+        "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=0")
+
+
+def test_clean_uses_the_material_temperature_by_default():
+    module = load_module()
+    offset = make_calibration(module, calibrated=True)
     with pytest.raises(CommandError, match="heater timeout"):
         offset.cmd_TOOL_CALIBRATE_TOOL_OFFSET(GCmd())
-    assert commands[0] == (
-        "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=200.0")
-    assert commands[1] == (
-        "TEMPERATURE_WAIT SENSOR=extruder MINIMUM=197.0 MAXIMUM=203.0")
-    assert commands[-1] == "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=0"
+    assert offset.commands[0] == "_FF_NOZZLE_CLEAN MODE=standby TOOLS=0"
+
+
+def test_clean_needs_a_station_calibration_too():
+    module = load_module()
+    offset = make_calibration(module, calibrated=True, station=None)
+    with pytest.raises(CommandError, match="heater timeout"):
+        offset.cmd_TOOL_CALIBRATE_TOOL_OFFSET(GCmd())
+    assert not any("_FF_NOZZLE_CLEAN" in c for c in offset.commands)
+
+
+def test_clean_left_with_the_heater_off_measures_nothing():
+    module = load_module()
+    offset = make_calibration(module, calibrated=True, heater_target=0.0)
+    with pytest.raises(CommandError, match="heater is off"):
+        offset.cmd_TOOL_CALIBRATE_TOOL_OFFSET(GCmd())
+    assert not any(c.startswith("TEMPERATURE_WAIT") for c in offset.commands)
 
 
 def test_public_macro_measures_station_once_and_skips_duplicate_checks():
