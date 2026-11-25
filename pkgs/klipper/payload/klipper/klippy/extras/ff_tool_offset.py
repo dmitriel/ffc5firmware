@@ -58,6 +58,11 @@ PROBE_ACCEL = 100.0        # SET_VELOCITY_LIMIT ACCEL=100 while probing
 # test.json defaults (Config::initTestConfig) for the station start point.
 CYLINDER_X_DEFAULT = 28.5
 CYLINDER_Y_DEFAULT = 214.5
+# The app's eddy probe point by the wipe pad (clearNozzleEddy @0x78e250,
+# reached via X250 so the travel stays clear of the docks).
+PAD_PROBE_X = 265.0
+PAD_PROBE_Y = 4.8
+PAD_PROBE_APPROACH_X = 250.0
 PLATE_REFERENCE_X_DEFAULT = 155.0
 PLATE_REFERENCE_Y_DEFAULT = 130.0
 
@@ -885,15 +890,18 @@ class FFToolOffset:
 
         Returns that temperature, read back from the heater so it is
         whatever the macro chose (lane, material table, TEMP=)."""
-        # The plate check leaves the raw frame in force; the wipe height is
-        # a G-code Z in the tool's own frame, so put both frames back first.
+        z_shift = self._pad_shift(gcmd)
+        # The plate check and the pad probe leave the raw frame in force;
+        # the wipe height is a G-code Z in the tool's own frame, so put both
+        # frames back first.
         self._leave_raw_frame()
         temps = ''
         if clean_temp > 0:
             temps = ' TEMPS=%s' % ','.join(
                 '%.1f' % clean_temp if i == tool else '0'
                 for i in range(EXTRUDER_COUNT))
-        self._run('_FF_NOZZLE_CLEAN MODE=standby TOOLS=%d%s' % (tool, temps))
+        self._run('_FF_NOZZLE_CLEAN MODE=standby TOOLS=%d%s Z_SHIFT=%.3f'
+                  % (tool, temps, z_shift))
         self._wait_moves()
         heater = self.printer.lookup_object('heaters').lookup_heater(
             tool_object.extruder_name)
@@ -904,6 +912,52 @@ class FFToolOffset:
                 " at or above the clean temperature?) -- nothing measured"
                 % (self.name, tool))
         return float(target)
+
+    def _pad_shift(self, gcmd):
+        """Where the wipe pad is in G-code Z today, against where
+        clean_wipe_z was measured.
+
+        _FF_NOZZLE_WIPE lowers to a fixed G-code Z, measured with the plate
+        on and Z homed on it. Calibration runs with the plate off, and Z
+        homed on the bare bed moves the whole G-code frame. The app never
+        trusted the frame: clearNozzleEddy probes the eddy at (265, 4.8)
+        with an empty carriage before every wipe and wipes at probeZ + 1.
+        Do the same, and hand the clean the difference from the reading
+        clean_wipe_z belongs to (_FF_FILAMENT's clean_probe_z)."""
+        if self.toolchange is not None:
+            carriage = self.toolchange.get_status(self.reactor.monotonic())
+            if carriage.get('current_tool', -1) != -1:
+                self._run('TOOLCHANGE_PARK')
+                self._wait_moves()
+            carriage = self.toolchange.get_status(self.reactor.monotonic())
+            if carriage.get('current_tool', -1) != -1 \
+               or not carriage.get('state_ok'):
+                raise gcmd.error(
+                    "%s: carriage is not verifiably empty (%s) -- cannot"
+                    " probe the wipe pad"
+                    % (self.name, carriage.get('state_reason')))
+        variables = self.printer.lookup_object(
+            'gcode_macro _FF_FILAMENT').variables
+        reference = float(variables.get('clean_probe_z', 0.12))
+        self._enter_raw_frame()
+        self._run('M400')
+        self._run('G1 Z%.3f F%d' % (self.z_start, FEED_PASS1))
+        self._run('G1 X%.3f F%d' % (PAD_PROBE_APPROACH_X, FEED_POSITION))
+        self._run('G1 Y%.3f F%d' % (PAD_PROBE_Y, FEED_POSITION))
+        self._run('G1 X%.3f F%d' % (PAD_PROBE_X, FEED_POSITION))
+        self._run('M400')
+        try:
+            probe_z = self._normal_probe()
+        except self.printer.command_error as err:
+            raise gcmd.error("%s: pad probe at (%.1f, %.1f) failed (%s)"
+                             % (self.name, PAD_PROBE_X, PAD_PROBE_Y, err))
+        self._run('G1 Z%.3f F%d' % (self.z_start, FEED_PASS1))
+        self._run('M400')
+        shift = probe_z - reference
+        gcmd.respond_info("  wipe pad probe: %.3f (reference %.3f), wipe"
+                          " height shifted %+.3f" % (probe_z, reference,
+                                                     shift))
+        return shift
 
     cmd_TOOL_LOCATE_SENSOR_help = (
         "Locate the station with an EMPTY carriage (station_x/y/z) "

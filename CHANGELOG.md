@@ -186,6 +186,14 @@ both printer models or through every real-world workflow.
 
 ### Fixed
 
+- The nozzle clean before each tool's offset calibration no longer stops
+  about 2 mm above the wipe pad. The wipe height is a fixed G-code Z, set
+  with the build plate on; calibration runs with the plate off, which moves
+  the G-code frame (Z homed on the bare bed). Calibration now does what the
+  stock firmware does before every wipe: with an empty carriage it takes an
+  eddy reading at the pad (X265 Y4.8) and moves the wipe by its difference
+  from `clean_probe_z` (0.12). A difference over `clean_probe_max_shift`
+  (3 mm) refuses the wipe. The print-start clean is unchanged.
 - A toolchange no longer shuts the eboard down with "Timer too close" just
   after the pickup. The second lock step runs unsynced so it can finish
   while the head leaves the dock, and its last steps were sent only by

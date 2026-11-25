@@ -114,7 +114,10 @@ carriage** — select the tool first.
 2. Cleans the nozzle the way the stock firmware's owner calibration does:
    `_FF_NOZZLE_CLEAN MODE=standby` grabs the tool, purges it at the material
    temperature (or `TEMP=`), wipes it on the pad while it cools by 100 C,
-   and parks it with the heater left there. Then it picks the tool back up
+   and parks it with the heater left there. Because the plate is off, the
+   empty carriage first takes an eddy reading at the pad (X265 Y4.8), as
+   stock does, and the wipe height moves by its difference from
+   `clean_probe_z`. Then it picks the tool back up
    and waits within 3 C. A tool with no calibration yet, or `CLEAN=0`, skips
    the clean and is heated to `probe_temp` (120 C) instead.
 3. Zeroes the G-code offset and works in raw machine coordinates.
