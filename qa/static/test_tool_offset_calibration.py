@@ -105,6 +105,7 @@ def make_calibration(module, calibrated, station=(28.8, 212.6, -1.68),
     offset._run_plate_check = lambda _gcmd: None
     offset._cylinder = lambda: (28.5, 214.5)
     offset._leave_raw_frame = lambda *_args: None
+    offset._pad_shift = lambda _gcmd: -2.0
     offset.commands = []
 
     def run(command):
@@ -138,7 +139,8 @@ def test_calibrated_tool_is_cleaned_then_measured_at_the_cooled_target():
     with pytest.raises(CommandError, match="heater timeout"):
         offset.cmd_TOOL_CALIBRATE_TOOL_OFFSET(GCmd({"TEMP": "240"}))
     assert offset.commands[0] == (
-        "_FF_NOZZLE_CLEAN MODE=standby TOOLS=0 TEMPS=240.0,0,0,0")
+        "_FF_NOZZLE_CLEAN MODE=standby TOOLS=0 TEMPS=240.0,0,0,0"
+        " Z_SHIFT=-2.000")
     # The clean leaves the heater at temp - clean_cool_delta: no re-heat.
     assert not any(c.startswith("SET_HEATER_TEMPERATURE HEATER=extruder"
                                 " TARGET=1") for c in offset.commands)
@@ -153,7 +155,8 @@ def test_clean_uses_the_material_temperature_by_default():
     offset = make_calibration(module, calibrated=True)
     with pytest.raises(CommandError, match="heater timeout"):
         offset.cmd_TOOL_CALIBRATE_TOOL_OFFSET(GCmd())
-    assert offset.commands[0] == "_FF_NOZZLE_CLEAN MODE=standby TOOLS=0"
+    assert offset.commands[0] == (
+        "_FF_NOZZLE_CLEAN MODE=standby TOOLS=0 Z_SHIFT=-2.000")
 
 
 def test_clean_needs_a_station_calibration_too():
@@ -179,3 +182,64 @@ def test_public_macro_measures_station_once_and_skips_duplicate_checks():
     assert macro.count("TOOL_LOCATE_SENSOR") == 1
     assert "TOOL_CALIBRATE_TOOL_OFFSET PLATE_CHECK=0" in macro
     assert "TEMP={params.TEMP}" in macro
+
+
+def make_pad_probe(module, reading, mounted=0):
+    offset = module.FFToolOffset.__new__(module.FFToolOffset)
+    offset.name = "ff_tool_offset"
+    offset.reactor = SimpleNamespace(monotonic=lambda: 0.0)
+    state = {"current_tool": mounted, "state_ok": True}
+    offset.toolchange = SimpleNamespace(get_status=lambda _e: dict(state))
+    macro = SimpleNamespace(variables={"clean_probe_z": 0.12})
+    toolhead = SimpleNamespace(wait_moves=lambda: None)
+    objects = {"gcode_macro _FF_FILAMENT": macro, "toolhead": toolhead}
+    offset.printer = SimpleNamespace(command_error=CommandError,
+                                     lookup_object=objects.__getitem__)
+    offset.z_start = 10.0
+    offset.commands = []
+    offset._enter_raw_frame = lambda: offset.commands.append("RAW")
+
+    def run(command):
+        offset.commands.append(command)
+        if command == "TOOLCHANGE_PARK":
+            state["current_tool"] = -1
+
+    offset._run = run
+    offset._normal_probe = lambda: reading
+    return offset
+
+
+def test_pad_probe_parks_probes_at_the_app_point_and_returns_the_shift():
+    module = load_module()
+    offset = make_pad_probe(module, reading=-1.88)
+    gcmd = GCmd()
+    assert offset._pad_shift(gcmd) == pytest.approx(-2.0)
+    assert offset.commands[0] == "TOOLCHANGE_PARK"
+    assert "RAW" in offset.commands
+    moves = [c for c in offset.commands if c.startswith("G1 X") or
+             c.startswith("G1 Y")]
+    # Via X250 so Y travel stays clear of the docks, then the probe point.
+    assert moves == ["G1 X250.000 F12000", "G1 Y4.800 F12000",
+                     "G1 X265.000 F12000"]
+    assert any("shifted -2.000" in line for line in gcmd.info)
+
+
+def test_pad_probe_refuses_a_carriage_it_cannot_empty():
+    module = load_module()
+    offset = make_pad_probe(module, reading=0.12)
+    offset._run = lambda command: offset.commands.append(command)
+    with pytest.raises(CommandError, match="not verifiably empty"):
+        offset._pad_shift(GCmd())
+
+
+def test_wipe_height_follows_z_shift_and_refuses_a_wild_one():
+    cfg = (ROOT / "pkgs/klipper-config/payload/config/ff-filament.cfg"
+           ).read_text()
+    wipe = cfg.split("[gcode_macro _FF_NOZZLE_WIPE]", 1)[1].split(
+        "[gcode_macro", 1)[0]
+    assert "ff.clean_wipe_z + z_shift" in wipe
+    assert "clean_probe_max_shift" in wipe
+    clean = (ROOT / "pkgs/klipper-config/payload/config/ff-print-macros.cfg"
+             ).read_text().split("[gcode_macro _FF_NOZZLE_CLEAN]", 1)[1]
+    clean = clean.split("[gcode_macro", 1)[0]
+    assert clean.count("Z_SHIFT={z_shift}") == 2
