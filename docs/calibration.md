@@ -16,8 +16,11 @@ and how those numbers reach a first layer, is
    the carriage probe compares the bed interior with the station area. It
    refuses unless the station area is recessed, so a forgotten plate is never
    used as the stop for the station probe.
-2. Remove large blobs from every nozzle. Each tool is measured at 200 C so
-   ordinary residue softens, but calibration does not purge or wipe it.
+2. Filament loaded in every tool. Before it is measured, each tool is purged
+   at the chute and wiped on the pad while it cools by 100 C, as the stock
+   firmware's own calibration does, and is measured at that cooler
+   temperature (120 C for PLA). `CLEAN=0` skips the purge for a head with no
+   filament; it is then measured at 120 C as it is.
 3. Tools docked. Each tool heats immediately before its pass and is turned off
    afterward, including when calibration fails.
 4. Klipper up, no print running.
@@ -33,8 +36,10 @@ SAVE_CONFIG              ; persists it, restarts Klipper
 
 `CALIBRATE_TOOL_OFFSETS` is klipper-toolchanger's documented entry point, so
 it is the name HelixScreen's wizard and other UIs look for. It checks the
-plate once, measures the station once, then measures each tool at 200 C.
-Override that temperature with `TEMP=`.
+plate once, measures the station once, then cleans and measures each tool.
+`TEMP=` overrides the purge temperature (default: the loaded material's).
+A tool that has never been calibrated is measured without the clean -- the
+wipe height needs its calibration -- so run a new tool's calibration twice.
 
 ```gcode
 TOOL_LOCATE_SENSOR                ; the reference, empty carriage

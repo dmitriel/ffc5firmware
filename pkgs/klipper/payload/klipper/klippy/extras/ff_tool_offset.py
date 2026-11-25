@@ -229,8 +229,15 @@ class FFToolOffset:
         self.plate_min_drop = config.getfloat('plate_min_drop',
                                               default_min_drop,
                                               above=0.)
-        self.calibration_temp = config.getfloat('calibration_temp', 200.0,
-                                                above=0.)
+        # Nozzle temperature to measure at when there is no clean
+        # (CLEAN=0, or a tool with no calibration to wipe with). 120 C is
+        # what the app's owner path measures PLA at: purge at 220, cool by
+        # 100. calibration_temp is the old name, from when this heated to
+        # 200 C and measured an unpurged nozzle there.
+        legacy_temp = config.getfloat('calibration_temp', None, above=0.)
+        self.probe_temp = config.getfloat(
+            'probe_temp', 120.0 if legacy_temp is None else legacy_temp,
+            above=0.)
         self.temperature_tolerance = config.getfloat(
             'temperature_tolerance', 3.0, above=0.)
 
@@ -729,7 +736,8 @@ class FFToolOffset:
 
     cmd_TOOL_CALIBRATE_TOOL_OFFSET_help = (
         "Measure the MOUNTED tool's nozzle position against the station "
-        "([SAVE=1] [PLATE_CHECK=1] [TEMP=200] [SAMPLES=] [SAMPLES_TOLERANCE=]"
+        "([SAVE=1] [PLATE_CHECK=1] [CLEAN=1] [TEMP=<clean C>]"
+        " [PROBE_TEMP=120] [SAMPLES=] [SAMPLES_TOLERANCE=]"
         " [SAMPLES_TOLERANCE_RETRIES=] [SAMPLES_RESULT=]"
         " [SAMPLE_RETRACT_DIST=] [PROBE_SPEED=])")
 
@@ -751,15 +759,34 @@ class FFToolOffset:
                 " is the command that wants an empty carriage.)"
                 % (self.name, EXTRUDER_COUNT - 1))
         save = gcmd.get_int('SAVE', 1, minval=0, maxval=1)
-        temp = gcmd.get_float('TEMP', self.calibration_temp, above=0.)
-        if temp <= self.temperature_tolerance:
+        clean = gcmd.get_int('CLEAN', 1, minval=0, maxval=1)
+        # TEMP= is the CLEAN temperature (0 / unset: the head's material,
+        # as the app's getFilamentOperationTemp); PROBE_TEMP= the temperature
+        # an uncleaned measurement is taken at.
+        clean_temp = gcmd.get_float('TEMP', 0., minval=0.)
+        probe_temp = gcmd.get_float('PROBE_TEMP', self.probe_temp, above=0.)
+        if probe_temp <= self.temperature_tolerance:
             raise gcmd.error(
-                "%s: TEMP must be above temperature_tolerance %.1f"
+                "%s: PROBE_TEMP must be above temperature_tolerance %.1f"
                 % (self.name, self.temperature_tolerance))
         tool_object = self.tools[tool]
         try:
             self._check_homed(gcmd)
             self._run_plate_check(gcmd)
+            if clean and not (tool_object.calibrated()
+                              and self.station is not None):
+                # _FF_NOZZLE_WIPE lowers to a G-code Z that only means
+                # "touching the pad" in a calibrated tool's frame; without
+                # one it is ~3 mm into it.
+                gcmd.respond_info(
+                    "T%d: no nozzle_z/station_z yet, so no clean (the wipe"
+                    " height needs them) -- measuring at %.0f C unpurged."
+                    " Run this again after SAVE_CONFIG for a cleaned"
+                    " measurement." % (tool, probe_temp))
+                clean = 0
+            if clean:
+                probe_temp = self._clean_nozzle(gcmd, tool, tool_object,
+                                                clean_temp)
             # Both the plate check (it has to measure an EMPTY carriage) and
             # homing (Z homes on the carriage's eddy sensor, so G28 docks
             # first) leave the tool we were asked about in its dock. Pick it
@@ -783,12 +810,13 @@ class FFToolOffset:
             gcmd.respond_info("T%d: offset calibration, start %.3f, %.3f"
                               % (tool, x0, y0))
 
-            self._run('SET_HEATER_TEMPERATURE HEATER=%s TARGET=%.1f'
-                      % (tool_object.extruder_name, temp))
+            if not clean:
+                self._run('SET_HEATER_TEMPERATURE HEATER=%s TARGET=%.1f'
+                          % (tool_object.extruder_name, probe_temp))
             self._run('TEMPERATURE_WAIT SENSOR=%s MINIMUM=%.1f MAXIMUM=%.1f'
                       % (tool_object.extruder_name,
-                         temp - self.temperature_tolerance,
-                         temp + self.temperature_tolerance))
+                         probe_temp - self.temperature_tolerance,
+                         probe_temp + self.temperature_tolerance))
             expected_z = (tool_object.nozzle[2]
                           if tool_object.calibrated() else None)
             if expected_z is None and self.station is not None:
@@ -808,6 +836,9 @@ class FFToolOffset:
                         " mis-trigger suspected, nothing saved"
                         % (self.name, tool, z_trigger, gap, self.station[2],
                            self.gap_min, self.gap_max))
+            gcmd.respond_info("T%d: measured at %.0f C%s"
+                              % (tool, probe_temp,
+                                 ", purged and wiped" if clean else ""))
             results = {tool: (center_x, center_y, z_trigger)}
             self.last['t%d' % tool] = (center_x, center_y, z_trigger)
             gcmd.respond_info("T%d: offset = (%.4f, %.4f, %.4f)"
@@ -815,7 +846,8 @@ class FFToolOffset:
             # Staged only once the guards above have passed, so a failed run
             # really does leave nothing saved -- which is what they promise.
             if save:
-                tool_object.set_nozzle(center_x, center_y, z_trigger)
+                tool_object.set_nozzle(center_x, center_y, z_trigger,
+                                       probe_temp)
 
             self._run('G1 Z%.3f F%d' % (self.z_final, FEED_PASS1))
             self._run('M400')
@@ -830,7 +862,7 @@ class FFToolOffset:
             # tool stays on the carriage, and leaving Z=0 at the eddy plane
             # means the next jog to Z0 puts the nozzle into the plate.
             self._restore_offset_frame(gcmd)
-            self._report_diffs(gcmd, results)
+            self._report_diffs(gcmd, results, {tool: probe_temp})
         finally:
             try:
                 self._run('SET_HEATER_TEMPERATURE HEATER=%s TARGET=0'
@@ -842,6 +874,36 @@ class FFToolOffset:
             # eddy plane, ~3.2 mm into the plate, for whatever the
             # operator jogs next.
             self._leave_raw_frame()
+
+    def _clean_nozzle(self, gcmd, tool, tool_object, clean_temp):
+        """The app's owner-path clean (calibration_center_manager ->
+        clearNozzleEddy, docs/notes/46-offset-calibration-recovered.md
+        section 0): grab, heat to the material temperature, purge, wipe on
+        the pad while cooling by clean_cool_delta, release. That is exactly
+        _FF_NOZZLE_CLEAN MODE=standby, which leaves the heater at
+        temp - clean_cool_delta -- the temperature the app then measures at.
+
+        Returns that temperature, read back from the heater so it is
+        whatever the macro chose (lane, material table, TEMP=)."""
+        # The plate check leaves the raw frame in force; the wipe height is
+        # a G-code Z in the tool's own frame, so put both frames back first.
+        self._leave_raw_frame()
+        temps = ''
+        if clean_temp > 0:
+            temps = ' TEMPS=%s' % ','.join(
+                '%.1f' % clean_temp if i == tool else '0'
+                for i in range(EXTRUDER_COUNT))
+        self._run('_FF_NOZZLE_CLEAN MODE=standby TOOLS=%d%s' % (tool, temps))
+        self._wait_moves()
+        heater = self.printer.lookup_object('heaters').lookup_heater(
+            tool_object.extruder_name)
+        target = heater.get_status(self.reactor.monotonic())['target']
+        if target <= self.temperature_tolerance:
+            raise gcmd.error(
+                "%s: T%d's heater is off after the clean (clean_cool_delta"
+                " at or above the clean temperature?) -- nothing measured"
+                % (self.name, tool))
+        return float(target)
 
     cmd_TOOL_LOCATE_SENSOR_help = (
         "Locate the station with an EMPTY carriage (station_x/y/z) "
@@ -924,7 +986,7 @@ class FFToolOffset:
             lines.append("! unsaved calibration pending -- run SAVE_CONFIG")
         gcmd.respond_info("\n".join(lines))
 
-    def _report_diffs(self, gcmd, results):
+    def _report_diffs(self, gcmd, results, temps=None):
         """What this run measured, and what a toolchange applies with it.
 
         The measured lines are the raw fit: the station-bore centre in
@@ -938,6 +1000,14 @@ class FFToolOffset:
         definition; its Z is not."""
         base_tool = (self.toolchange.offset_base
                      if self.toolchange is not None else 0)
+        temps = temps or {}
+
+        def correction(tool):
+            """ff_toolchange.measurement_correction for this run's temp."""
+            if self.toolchange is None:
+                return 0.0
+            temp = temps.get(tool, self.tools[tool].nozzle_temp)
+            return -(temp - 120.0) * self.toolchange.temp_offset
         lines = []
         for tool, (center_x, center_y, z_trigger) in sorted(results.items()):
             lines.append("T%d measured: nozzle centre %.4f, %.4f"
@@ -953,15 +1023,18 @@ class FFToolOffset:
             lines.append("offsets a toolchange applies (X/Y vs T%d; Z %s):"
                          % (base_tool,
                             "absolute: nozzle_z - station_z + z_adjust"
+                            " + measured-temperature correction"
                             if z_station is not None
                             else "vs T%d, + z_adjust" % base_tool))
             for tool, (center_x, center_y, z_trigger) in sorted(
                     results.items()):
                 z_adjust = self.tools[tool].z_adjust
                 if z_station is not None:
-                    z_applied = z_adjust + (z_trigger - z_station)
+                    z_applied = (z_adjust + (z_trigger - z_station)
+                                 + correction(tool))
                 else:
-                    z_applied = z_adjust + (z_trigger - base_nozzle[2])
+                    z_applied = (z_adjust + (z_trigger - base_nozzle[2])
+                                 + correction(tool) - correction(base_tool))
                 lines.append("  T%d: dX %+.4f  dY %+.4f  Z %+.4f"
                              % (tool, center_x - base_nozzle[0],
                                 center_y - base_nozzle[1], z_applied))

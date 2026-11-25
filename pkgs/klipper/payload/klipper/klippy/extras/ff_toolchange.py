@@ -18,6 +18,10 @@ import contextlib
 import logging
 
 EXTRUDER_COUNT = 4
+# The nozzle temperature the app measures offsets at (PLA: purge at 220, cool
+# by 100) and the reference of its print-start thermal term. ff_tool.py has
+# the same constant for its nozzle_temp default.
+MEASURE_REFERENCE = 120.0
 
 # Timings and retry counts, straight from doGrabExtruderLatest and
 # doReleaseExtruderLatest. The app's waits are "N tries x usleep(50000)";
@@ -137,7 +141,7 @@ class _ToolView:
                 # already carries z_adjust -- see _derive_offsets.
                 'gcode_x_offset': toolchanger.offset_x[self.index],
                 'gcode_y_offset': toolchanger.offset_y[self.index],
-                'gcode_z_offset': toolchanger.offset_z[self.index],
+                'gcode_z_offset': toolchanger.offset_z_120c[self.index],
                 'calibrated': tool.calibrated()}
 
 
@@ -206,7 +210,7 @@ class _ToolTransform:
             return None
         return (self.toolchange.offset_x[tool],
                 self.toolchange.offset_y[tool],
-                self.toolchange.offset_z[tool] + self.toolchange.job_z)
+                self.toolchange.offset_z_120c[tool] + self.toolchange.job_z)
 
     def move(self, newpos, speed):
         offsets = self._offsets()
@@ -276,7 +280,12 @@ class FFToolchange:
                                          minval=0, maxval=EXTRUDER_COUNT - 1)
         self.offset_x = [0.0] * EXTRUDER_COUNT
         self.offset_y = [0.0] * EXTRUDER_COUNT
-        self.offset_z = [0.0] * EXTRUDER_COUNT
+        # Each tool's Z for a nozzle at 120 C: the frame puts Z=0 on the bed
+        # when the nozzle is at the app's measuring temperature. Growth from
+        # 120 C to the print temperature is job_z's (nozzle - 120) term, and
+        # a measurement taken at another temperature is brought to 120 C by
+        # measurement_correction(). See _derive_offsets.
+        self.offset_z_120c = [0.0] * EXTRUDER_COUNT
         # Per-tool XYZ, below Klipper's own G-code offset. Built BEFORE the
         # first refresh_offsets(), which reads the transform to decide whether
         # gcode_move's position cache needs invalidating; a transform created
@@ -458,6 +467,13 @@ class FFToolchange:
         the plate. The print-only terms (thermal, bed, thin layer) are
         added by TOOLCHANGE_SET_PRINT_OFFSET on top.
 
+        Each nozzle_z also gets measurement_correction(): that thermal
+        term, (nozzle_temp - 120) * temp_offset, assumes the nozzle was
+        measured at 120 C, as the app does for PLA. A tool measured at any
+        other temperature already carries (measured - 120) * temp_offset of
+        growth, which is taken back out here. In the relative fallback
+        both sides are corrected.
+
         nozzle_* are the station-bore centre measured with each tool's
         nozzle ([ff_tool n], written by TOOL_CALIBRATE_TOOL_OFFSET);
         z_adjust is the user's per-tool Z tune (the app's zoffset.json).
@@ -484,21 +500,31 @@ class FFToolchange:
                 x_offsets.append(0.0)
                 y_offsets.append(0.0)
             if tool.calibrated() and z_station is not None:
-                z_offsets.append(tool.z_adjust + (tool.nozzle[2] - z_station))
+                z_offsets.append(tool.z_adjust + (tool.nozzle[2] - z_station)
+                                 + self.measurement_correction(tool))
             elif tool.calibrated() and base_ok:
-                z_offsets.append(tool.z_adjust + (tool.nozzle[2] - base_z))
+                z_offsets.append(tool.z_adjust + (tool.nozzle[2] - base_z)
+                                 + self.measurement_correction(tool)
+                                 - self.measurement_correction(tools[base]))
             else:
                 z_offsets.append(tool.z_adjust)
         return x_offsets, y_offsets, z_offsets
+
+    def measurement_correction(self, tool):
+        """Z to add to a nozzle_z measured at tool.nozzle_temp so the
+        print-start thermal term, referenced to 120 C, counts the growth
+        once. 0 at 120 C; -0.036 mm at 200 C with temp_offset 0.00045."""
+        temp = getattr(tool, 'nozzle_temp', MEASURE_REFERENCE)
+        return -(temp - MEASURE_REFERENCE) * self.temp_offset
 
     def refresh_offsets(self, gcmd=None):
         """Re-derive after a calibration changed an [ff_tool] live."""
         derived_x, derived_y, derived_z = self._derive_offsets(
             self.offset_base)
         changed = ((derived_x, derived_y, derived_z)
-                   != (self.offset_x, self.offset_y, self.offset_z))
-        self.offset_x, self.offset_y, self.offset_z = (derived_x, derived_y,
-                                                       derived_z)
+                   != (self.offset_x, self.offset_y, self.offset_z_120c))
+        self.offset_x, self.offset_y, self.offset_z_120c = (
+            derived_x, derived_y, derived_z)
         # The transform reads these lists live, so new numbers are already
         # in force -- but gcode_move's cached position is not, and a stale
         # cache is a silent jump on the next move.
@@ -1329,7 +1355,7 @@ class FFToolchange:
         carriage at a dock.
 
         offset_x/offset_y are tool-to-tool DIFFERENCES against the base
-        tool; offset_z is this tool's ABSOLUTE gap to the bed plane
+        tool; offset_z_120c is this tool's ABSOLUTE gap to the bed plane
         (~+3.2 mm, see _derive_offsets). Applying the gap on every grab --
         rather than once per print, as the app's setZOffsetWhenPrint does --
         is what makes Z=0 the bed plane whenever a tool is mounted, so a
@@ -1442,7 +1468,7 @@ class FFToolchange:
         nozzles = [tool_object.nozzle or (0.0, 0.0, 0.0)
                    for tool_object in self.tools]
         z_adjusts = [tool_object.z_adjust for tool_object in self.tools]
-        z = (nozzle - 120.0) * temp_coeff
+        z = (nozzle - MEASURE_REFERENCE) * temp_coeff
         if bed >= 100.0:
             z += 0.08
         int_layer = int(layer * 100.0)
@@ -1450,11 +1476,14 @@ class FFToolchange:
             z += -0.06
         gcmd.respond_info(
             "print Z offset for T%d: %.3f (temp %+.3f, bed %+.2f,"
-            " layer %+.2f); T%d frame carries gap %+.3f, z_adjust %+.3f"
-            % (tool, z, (nozzle - 120.0) * temp_coeff,
+            " layer %+.2f); T%d frame carries gap %+.3f, z_adjust %+.3f,"
+            " measured-at-%.0f C correction %+.3f"
+            % (tool, z, (nozzle - MEASURE_REFERENCE) * temp_coeff,
                0.08 if bed >= 100.0 else 0.0,
                -0.06 if 0 < int_layer <= 10 else 0.0,
-               tool, nozzles[tool][2] - z_station, z_adjusts[tool]))
+               tool, nozzles[tool][2] - z_station, z_adjusts[tool],
+               self.tools[tool].nozzle_temp,
+               self.measurement_correction(self.tools[tool])))
         self.job_z = z
         self._reset_gcode_position()
 
@@ -1590,7 +1619,7 @@ class FFToolchange:
             lines.append("  frame applied: T%d  (X %+.4f, Y %+.4f, Z %+.4f,"
                          " job Z %+.3f)"
                          % (applied, self.offset_x[applied],
-                            self.offset_y[applied], self.offset_z[applied],
+                            self.offset_y[applied], self.offset_z_120c[applied],
                             self.job_z))
         if self.runout_motion:
             lines.append("  clog sensor armed: %s"
@@ -1611,9 +1640,12 @@ class FFToolchange:
         lines.append("geometry ([ff_tool n] / [ff_toolchange]):")
         for tool_object in self.tools:
             if tool_object.calibrated():
-                lines.append("  T%d nozzle (%.4f, %.4f, %.4f)  z_adjust %+.3f"
+                lines.append("  T%d nozzle (%.4f, %.4f, %.4f) at %.0f C"
+                             " (%+.3f)  z_adjust %+.3f"
                              % (tool_object.index, tool_object.nozzle[0],
                                 tool_object.nozzle[1], tool_object.nozzle[2],
+                                tool_object.nozzle_temp,
+                                self.measurement_correction(tool_object),
                                 tool_object.z_adjust))
             else:
                 lines.append("  T%d nozzle NOT CALIBRATED"
@@ -1641,7 +1673,7 @@ class FFToolchange:
             lines.append("  ! no dock position for T%s -- run"
                          " FF_IMPORT_FIRMWARE_CONFIG and SAVE_CONFIG"
                          % ", T".join(str(i) for i in missing))
-        series_line('offset_z', self.offset_z)
+        series_line('offset_z_120c', self.offset_z_120c)
         series_line('offset_x', self.offset_x)
         series_line('offset_y', self.offset_y)
         lines.append("  offset_base   T%d" % self.offset_base)

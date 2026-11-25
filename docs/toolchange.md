@@ -207,7 +207,7 @@ under-bed ESTOP sensor is approached (`PLATE_CHECK=0` or
 `plate_check: False` skips it). Then run:
 
 ```gcode
-CALIBRATE_TOOL_OFFSETS          ; station, then every tool at 200 C
+CALIBRATE_TOOL_OFFSETS          ; station, then every tool, each cleaned first
 CALIBRATE_TOOL_OFFSETS TOOL=2   ; station, then T2 only
 SAVE_CONFIG
 ```
@@ -223,8 +223,11 @@ Re-run `TOOL_LOCATE_SENSOR` whenever the station or bed is disturbed.
 
 `CALIBRATE_TOOL_OFFSETS` checks the plate and measures the station once, then
 passes `PLATE_CHECK=0` to each requested tool so that work is not repeated.
-Each nozzle is heated to 200 C, waited within 3 C, held hot through the two
-passes, and always turned off afterward. `TEMP=` overrides 200 C. It is
+Each nozzle is purged and cold-wiped first, as in the stock firmware's
+owner calibration, and measured at the temperature that leaves it at
+(material − 100 C, 120 C for PLA), which is saved as `nozzle_temp`; the
+heater is always turned off afterward. `TEMP=` overrides the purge
+temperature, `CLEAN=0` skips the clean. It is
 klipper-toolchanger's documented entry point, so it is the name HelixScreen's
 setup wizard and other UIs look for. The low-level commands remain available
 for compatibility and diagnostics.

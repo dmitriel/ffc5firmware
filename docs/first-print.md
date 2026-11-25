@@ -45,7 +45,7 @@ Before moving anything:
 
 * `TOOLCHANGE_STATUS` — current tool as derived from the dock sensors, every
   sensor's state, each tool's nozzle position and `z_adjust`, `station_z`,
-  dock coordinates and the derived offsets (`offset_z` is each tool's
+  dock coordinates and the derived offsets (`offset_z_120c` is each tool's
   absolute bed-frame gap, ~3.2). Check the `dock_x`/`dock_y` rows are
   numbers, not `nan`.
 * `TOOL_OFFSET_STATUS` — saved calibration per tool and for the station,

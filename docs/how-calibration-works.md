@@ -111,13 +111,19 @@ carriage** — select the tool first.
 1. Homes if any axis is unhomed. A direct low-level invocation also runs the
    plate check; `CALIBRATE_TOOL_OFFSETS` already ran it once with the station
    pass and skips the duplicate.
-2. Picks the tool up, heats it to 200 C (or `TEMP=`), and waits within 3 C.
+2. Cleans the nozzle the way the stock firmware's owner calibration does:
+   `_FF_NOZZLE_CLEAN MODE=standby` grabs the tool, purges it at the material
+   temperature (or `TEMP=`), wipes it on the pad while it cools by 100 C,
+   and parks it with the heater left there. Then it picks the tool back up
+   and waits within 3 C. A tool with no calibration yet, or `CLEAN=0`, skips
+   the clean and is heated to `probe_temp` (120 C) instead.
 3. Zeroes the G-code offset and works in raw machine coordinates.
 4. Same two passes as above, from `cylinder_x − 12.5` (16.0 stock), with the
-   hot nozzle doing the touching.
+   clean, warm nozzle doing the touching.
 5. Checks `nozzle_z − station_z` lands in `gap_min`…`gap_max` (1.5–5.0 mm;
    ~3.2 mm is right on a healthy machine).
-6. Stages `nozzle_x`, `nozzle_y`, `nozzle_z` into `[ff_tool <n>]`.
+6. Stages `nozzle_x`, `nozzle_y`, `nozzle_z` and the measuring temperature
+   `nozzle_temp` into `[ff_tool <n>]`.
 7. Turns that heater off even after failure, lifts to Z15, and restores the
    offset frame.
 
@@ -154,7 +160,15 @@ On every grab of a tool, the toolchanger applies:
 X = nozzle_x[tool] - nozzle_x[base]              difference vs the base tool
 Y = nozzle_y[tool] - nozzle_y[base]
 Z = nozzle_z[tool] - station_z + z_adjust[tool]  absolute
+    - (nozzle_temp[tool] - 120) * temp_offset
 ```
+
+The print-start thermal term, `(print temperature − 120) × temp_offset`,
+comes from the stock firmware and assumes the nozzle was measured at 120 C.
+A tool measured warmer (PETG is purged at 240 and measured at 140) already
+carries that extra growth in its `nozzle_z`, so it is taken back out here:
+0.009 mm at 140 C. A missing `nozzle_temp`, as in an import of the stock
+calibration, counts as 120 C.
 
 X and Y are differences, so the base tool's are zero. Z is absolute, which is
 what makes Z0 the bed plane whenever a tool is mounted — not only after

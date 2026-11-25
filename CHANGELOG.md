@@ -197,6 +197,23 @@ both printer models or through every real-world workflow.
   where the nozzle would otherwise leave its path by more than 0.005 mm
   (`split_tolerance`), so a cross-bed travel is a couple of dozen moves
   instead of 120.
+- Tool offset calibration now measures each nozzle the way the stock
+  firmware's own calibration does, and tools no longer print about 0.1 mm
+  too high. Before it is measured, each tool is purged at the chute and wiped
+  on the pad while cooling by 100 C, and is measured at that temperature
+  (120 C for PLA). It used to be heated to 200 C and measured unpurged, so
+  ooze on the tip touched the sensor first, and the print's thermal Z term,
+  which assumes a 120 C measurement, counted the extra heat a second time.
+  The measuring temperature is now saved as `[ff_tool n] nozzle_temp`, and
+  each tool's Z offset is corrected for any temperature other than 120 C
+  (`temp_offset`, 0.00045 mm per degree: 0.009 mm for PETG measured at
+  140 C). Filament must be loaded for the purge; `CLEAN=0` skips it. A tool
+  that has never been calibrated is measured without the clean, because the
+  wipe height needs its calibration, so calibrate a new tool twice.
+  `calibration_temp` is renamed `probe_temp` (default 120) and now only sets
+  the temperature of an uncleaned measurement. Run `CALIBRATE_TOOL_OFFSETS`
+  and `SAVE_CONFIG` again to replace calibrations made before this update,
+  and remove any `z_adjust` you set to make up for the error.
 - A toolchange no longer returns to the print with the new head still
   heating. AFC moved the head back over the part as soon as it had grabbed the
   new head, so the nozzle reached temperature above the model and left blobs
