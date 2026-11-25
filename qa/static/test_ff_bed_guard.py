@@ -74,7 +74,7 @@ class Toolchange:
 
     def __init__(self, mounted=0):
         self.mounted = mounted
-        self.offset_z = [3.2, 3.1, 3.3, 3.25]
+        self.offset_z_120c = [3.2, 3.1, 3.3, 3.25]
         self.job_z = 0.
         self.tools = [SimpleNamespace(z_adjust=0.) for _ in range(4)]
         self.calibrated = {0, 1, 2, 3}

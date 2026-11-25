@@ -22,7 +22,7 @@
 #     at station_z and each nozzle at nozzle_z; the per-tool frame puts the
 #     nozzle on the plate at nozzle_z - station_z, which places the
 #     carriage's own underside at ~0. Default 0.0.
-#   * a mounted tool: the Z=0 of its frame -- offset_z[tool] + job_z, the
+#   * a mounted tool: the Z=0 of its frame -- offset_z_120c[tool] + job_z, the
 #     same numbers _ToolTransform adds -- moved by the operator's Z offset
 #     (SET_GCODE_OFFSET Z / babystep, gcode_move's homing_origin), so a
 #     G-code Z of 0.1 is exactly the limit whatever the offset. A tool
@@ -200,7 +200,7 @@ class FFBedGuard:
         """Machine Z at which `tool`'s nozzle meets a flat, unmeshed bed."""
         tc = self.toolchange
         if tc.print_offset_ready(tool):
-            base = tc.offset_z[tool]
+            base = tc.offset_z_120c[tool]
         else:
             base = (self.carriage_contact_z + self.nozzle_gap
                     + tc.tools[tool].z_adjust)

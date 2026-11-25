@@ -763,7 +763,7 @@ class FFTiltCorrection:
         if toolchange is None or tool is None or tool < 0:
             return (0., 0., 0.)
         return (toolchange.offset_x[tool], toolchange.offset_y[tool],
-                toolchange.offset_z[tool] + toolchange.job_z)
+                toolchange.offset_z_120c[tool] + toolchange.job_z)
 
     def _initial_tool(self):
         """The tool the file's moves before its first T<n> run on."""

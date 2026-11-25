@@ -141,7 +141,7 @@ class _ToolView:
                 # already carries z_adjust -- see _derive_offsets.
                 'gcode_x_offset': toolchanger.offset_x[self.index],
                 'gcode_y_offset': toolchanger.offset_y[self.index],
-                'gcode_z_offset': toolchanger.offset_z[self.index],
+                'gcode_z_offset': toolchanger.offset_z_120c[self.index],
                 'calibrated': tool.calibrated()}
 
 
@@ -210,7 +210,7 @@ class _ToolTransform:
             return None
         return (self.toolchange.offset_x[tool],
                 self.toolchange.offset_y[tool],
-                self.toolchange.offset_z[tool] + self.toolchange.job_z)
+                self.toolchange.offset_z_120c[tool] + self.toolchange.job_z)
 
     def move(self, newpos, speed):
         offsets = self._offsets()
@@ -280,7 +280,12 @@ class FFToolchange:
                                          minval=0, maxval=EXTRUDER_COUNT - 1)
         self.offset_x = [0.0] * EXTRUDER_COUNT
         self.offset_y = [0.0] * EXTRUDER_COUNT
-        self.offset_z = [0.0] * EXTRUDER_COUNT
+        # Each tool's Z for a nozzle at 120 C: the frame puts Z=0 on the bed
+        # when the nozzle is at the app's measuring temperature. Growth from
+        # 120 C to the print temperature is job_z's (nozzle - 120) term, and
+        # a measurement taken at another temperature is brought to 120 C by
+        # measurement_correction(). See _derive_offsets.
+        self.offset_z_120c = [0.0] * EXTRUDER_COUNT
         # Per-tool XYZ, below Klipper's own G-code offset. Built BEFORE the
         # first refresh_offsets(), which reads the transform to decide whether
         # gcode_move's position cache needs invalidating; a transform created
@@ -517,9 +522,9 @@ class FFToolchange:
         derived_x, derived_y, derived_z = self._derive_offsets(
             self.offset_base)
         changed = ((derived_x, derived_y, derived_z)
-                   != (self.offset_x, self.offset_y, self.offset_z))
-        self.offset_x, self.offset_y, self.offset_z = (derived_x, derived_y,
-                                                       derived_z)
+                   != (self.offset_x, self.offset_y, self.offset_z_120c))
+        self.offset_x, self.offset_y, self.offset_z_120c = (
+            derived_x, derived_y, derived_z)
         # The transform reads these lists live, so new numbers are already
         # in force -- but gcode_move's cached position is not, and a stale
         # cache is a silent jump on the next move.
@@ -1350,7 +1355,7 @@ class FFToolchange:
         carriage at a dock.
 
         offset_x/offset_y are tool-to-tool DIFFERENCES against the base
-        tool; offset_z is this tool's ABSOLUTE gap to the bed plane
+        tool; offset_z_120c is this tool's ABSOLUTE gap to the bed plane
         (~+3.2 mm, see _derive_offsets). Applying the gap on every grab --
         rather than once per print, as the app's setZOffsetWhenPrint does --
         is what makes Z=0 the bed plane whenever a tool is mounted, so a
@@ -1614,7 +1619,7 @@ class FFToolchange:
             lines.append("  frame applied: T%d  (X %+.4f, Y %+.4f, Z %+.4f,"
                          " job Z %+.3f)"
                          % (applied, self.offset_x[applied],
-                            self.offset_y[applied], self.offset_z[applied],
+                            self.offset_y[applied], self.offset_z_120c[applied],
                             self.job_z))
         if self.runout_motion:
             lines.append("  clog sensor armed: %s"
@@ -1668,7 +1673,7 @@ class FFToolchange:
             lines.append("  ! no dock position for T%s -- run"
                          " FF_IMPORT_FIRMWARE_CONFIG and SAVE_CONFIG"
                          % ", T".join(str(i) for i in missing))
-        series_line('offset_z', self.offset_z)
+        series_line('offset_z_120c', self.offset_z_120c)
         series_line('offset_x', self.offset_x)
         series_line('offset_y', self.offset_y)
         lines.append("  offset_base   T%d" % self.offset_base)

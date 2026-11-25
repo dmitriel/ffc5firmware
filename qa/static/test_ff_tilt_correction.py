@@ -538,7 +538,7 @@ class Printer:
         toolchange = SimpleNamespace(
             offset_x=[o[0] for o in OFFSETS],
             offset_y=[o[1] for o in OFFSETS],
-            offset_z=[o[2] for o in OFFSETS], job_z=JOB_Z,
+            offset_z_120c=[o[2] for o in OFFSETS], job_z=JOB_Z,
             gcode_transform=self.frame,
             _current_tool_or_none=lambda: (self.frame.tool, ''))
         self.objects = {
